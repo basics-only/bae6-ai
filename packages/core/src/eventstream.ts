@@ -28,6 +28,9 @@ export async function* frames(
         throw new Error("event-stream message CRC mismatch");
       }
       const headersEnd = 12 + buf.readUInt32BE(4);
+      if (headersEnd > total - 4) {
+        throw new Error("event-stream headers overrun the frame");
+      }
       yield {
         headers: parseHeaders(buf.subarray(12, headersEnd)),
         payload: Buffer.from(buf.subarray(headersEnd, total - 4)),
@@ -45,10 +48,14 @@ function parseHeaders(b: Buffer): Record<string, string> {
     const nameLength = b.readUInt8(i);
     const name = b.toString("utf8", i + 1, i + 1 + nameLength);
     i += 1 + nameLength;
+    // readUInt* throw past the end; toString would silently truncate the value.
     if (b.readUInt8(i) !== STRING_HEADER) {
       throw new Error("unsupported event-stream header type");
     }
     const length = b.readUInt16BE(i + 1);
+    if (i + 3 + length > b.length) {
+      throw new Error("event-stream header overruns the headers");
+    }
     out[name] = b.toString("utf8", i + 3, i + 3 + length);
     i += 3 + length;
   }

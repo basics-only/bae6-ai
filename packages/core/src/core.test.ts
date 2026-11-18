@@ -6,6 +6,7 @@ import {
 } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
+import { crc32 } from "node:zlib";
 import { bedrockProvider } from "./bedrock.js";
 import { encodeFrame, frames } from "./eventstream.js";
 import { signV4 } from "./sigv4.js";
@@ -369,6 +370,102 @@ test("Vertex chat, SSE streaming and embeddings map to the common shapes", async
       vectors: [[0.1, 0.2]],
       usage: { inputTokens: 3 },
     });
+  } finally {
+    server.close();
+  }
+});
+
+test("event-stream headers that overrun their frame are rejected", async () => {
+  const frame = encodeFrame({ ":message-type": "event" }, Buffer.from("{}"));
+  frame.writeUInt32BE(frame.length, 4);
+  frame.writeUInt32BE(crc32(frame.subarray(0, 8)), 8);
+  frame.writeUInt32BE(
+    crc32(frame.subarray(0, frame.length - 4)),
+    frame.length - 4,
+  );
+  await assert.rejects(async () => {
+    for await (const _ of frames(
+      (async function* () {
+        yield frame;
+      })(),
+    )) {
+    }
+  }, /overrun/);
+});
+
+test("a Bedrock embedding that fails after earlier inputs were billed may have been billed", async () => {
+  let calls = 0;
+  const server = await mock((_, res) =>
+    ++calls === 1
+      ? sendJson(res, 200, { embedding: [0.1], inputTextTokenCount: 1 })
+      : sendJson(res, 429, {}),
+  );
+  try {
+    const p = bedrockProvider({
+      descriptor: descriptor("titan", "bedrock"),
+      modelId: "m",
+      region: "us-east-1",
+      credentials,
+      endpoint: server.url,
+    });
+    await assert.rejects(
+      p.embed(["a", "b"], AbortSignal.timeout(1000)),
+      (err) => err instanceof ProviderError && err.billed === "unknown",
+    );
+  } finally {
+    server.close();
+  }
+});
+
+test("Vertex bills thinking tokens, reads an unterminated last line, and a stream with no finish may be billed", async () => {
+  let finished = true;
+  const server = await mock((s, res) => {
+    if (s.path.endsWith(":generateContent")) {
+      return sendJson(res, 200, {
+        candidates: [
+          { content: { parts: [{ text: "x" }] }, finishReason: "STOP" },
+        ],
+        usageMetadata: {
+          promptTokenCount: 9,
+          candidatesTokenCount: 2,
+          thoughtsTokenCount: 5,
+          totalTokenCount: 16,
+        },
+      });
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(
+      finished
+        ? 'data: {"candidates":[{"content":{"parts":[{"text":"Hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":4,"totalTokenCount":6}}'
+        : 'data: {"candidates":[{"content":{"parts":[{"text":"Hi"}]}}],"usageMetadata":{"promptTokenCount":4,"totalTokenCount":6}}\n\n',
+    );
+  });
+  try {
+    const p = vertexProvider({
+      descriptor: descriptor("gemini", "vertex"),
+      model: "gemini-2.5-flash",
+      project: "proj",
+      region: "europe-west4",
+      token: async () => "ya29.test",
+      endpoint: server.url,
+    });
+    assert.deepEqual((await p.chat(request())).usage, {
+      inputTokens: 9,
+      outputTokens: 7,
+    });
+    assert.deepEqual(await collect(p.stream(request())), [
+      { type: "delta", text: "Hi" },
+      {
+        type: "done",
+        finishReason: "stop",
+        usage: { inputTokens: 4, outputTokens: 2 },
+      },
+    ]);
+    finished = false;
+    await assert.rejects(
+      collect(p.stream(request())),
+      (err) => err instanceof ProviderError && err.billed === "unknown",
+    );
   } finally {
     server.close();
   }

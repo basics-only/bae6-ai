@@ -2,7 +2,7 @@ export interface AiOptions {
   baseUrl: string;
   /** Bearer token identifying this workload to the gateway. */
   credentials: string;
-  /** Total time allowed per non-streaming request. Defaults to 120000. */
+  /** Total time per request; for a stream, the wait for each chunk. Defaults to 120000. */
   timeoutMs?: number;
 }
 
@@ -161,21 +161,25 @@ const invalidResponse = () =>
     "the gateway returned an unusable response",
   );
 
-async function* lines(body: ReadableStream<Uint8Array>) {
+/** Lines without endings, including a last unterminated one; `onData` runs per chunk. */
+async function* lines(body: ReadableStream<Uint8Array>, onData: () => void) {
+  const oversized = () =>
+    new AiTransportError("the gateway sent an oversized stream event");
   const decoder = new TextDecoder();
   let buffered = "";
   for await (const bytes of body) {
+    onData();
     buffered += decoder.decode(bytes, { stream: true });
-    let nl = buffered.indexOf("\n");
-    while (nl >= 0) {
-      yield buffered.slice(0, nl).replace(/\r$/, "");
-      buffered = buffered.slice(nl + 1);
-      nl = buffered.indexOf("\n");
+    const complete = buffered.split("\n");
+    buffered = complete.pop() ?? "";
+    for (const line of complete) {
+      if (line.length > MAX_SSE_LINE) throw oversized();
+      yield line.replace(/\r$/, "");
     }
-    if (buffered.length > MAX_SSE_LINE) {
-      throw new AiTransportError("the gateway sent an oversized stream event");
-    }
+    if (buffered.length > MAX_SSE_LINE) throw oversized();
   }
+  buffered += decoder.decode();
+  if (buffered) yield buffered.replace(/\r$/, "");
 }
 
 export class Ai {
@@ -212,16 +216,35 @@ export class Ai {
     request: ChatRequest,
     options: Omit<CallOptions, "idempotencyKey"> = {},
   ): AsyncGenerator<ChatChunk> {
-    const res = await this.#fetch("POST", "/v1/chat/completions", options, {
-      ...request,
-      stream: true,
-      stream_options: { include_usage: true },
-    });
-    if (res.status !== 200 || !res.body) {
-      throw httpError(res.status, parseJson(await this.#text(res)));
+    // timeoutMs bounds the wait for the answer and then each gap between chunks.
+    const idle = new AbortController();
+    const expire = () =>
+      idle.abort(new DOMException("stream idle", "TimeoutError"));
+    let timer = setTimeout(expire, this.#timeoutMs);
+    const touch = () => {
+      clearTimeout(timer);
+      timer = setTimeout(expire, this.#timeoutMs);
+    };
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, idle.signal])
+      : idle.signal;
+    let res: Response;
+    try {
+      res = await this.#fetch(
+        "POST",
+        "/v1/chat/completions",
+        { ...options, signal },
+        { ...request, stream: true, stream_options: { include_usage: true } },
+      );
+      if (res.status !== 200 || !res.body) {
+        throw httpError(res.status, parseJson(await this.#text(res)));
+      }
+    } catch (err) {
+      clearTimeout(timer);
+      throw err;
     }
     try {
-      for await (const line of lines(res.body)) {
+      for await (const line of lines(res.body, touch)) {
         if (!line.startsWith("data: ")) continue;
         const data = line.slice(6);
         if (data === "[DONE]") return;
@@ -234,10 +257,14 @@ export class Ai {
       }
     } catch (err) {
       if (err instanceof AiError) throw err;
+      if (err instanceof Error && err.name === "TimeoutError") {
+        throw this.#transport(err);
+      }
       throw new AiTransportError(
         `the stream failed (${err instanceof Error ? err.name : "error"})`,
       );
     } finally {
+      clearTimeout(timer);
       await res.body.cancel().catch(() => {});
     }
     throw new AiTransportError("the stream ended before completion");
@@ -337,8 +364,8 @@ export class Ai {
     try {
       for await (const chunk of res.body) {
         size += chunk.byteLength;
+        // Throwing out of the loop cancels the body; cancel() here would fail on the locked stream.
         if (size > MAX_RESPONSE_BYTES) {
-          await res.body.cancel();
           throw new AiTransportError("the gateway response is too large");
         }
         chunks.push(chunk);
