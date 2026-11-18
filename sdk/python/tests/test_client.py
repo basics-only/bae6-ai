@@ -1,10 +1,19 @@
 import asyncio
 import json
 import traceback
+from datetime import UTC, datetime
 
 import httpx
 import pytest
-from bae6_ai import Ai, AiApiError, AiAuthError, AiBudgetError, AiTransportError
+
+from bae6_ai import (
+    Ai,
+    AiApiError,
+    AiAuthError,
+    AiBudgetError,
+    AiTimeoutError,
+    AiTransportError,
+)
 
 MESSAGES = [{"role": "user", "content": "hi"}]
 USAGE = {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
@@ -85,3 +94,46 @@ def test_transport_error_does_not_carry_a_token() -> None:
     with pytest.raises(AiTransportError) as raised:
         asyncio.run(call())
     assert "SECRET" not in "".join(traceback.format_exception(raised.value))
+
+
+def test_reads_a_last_stream_line_sent_without_a_newline() -> None:
+    last = json.dumps({"choices": [], "usage": USAGE})
+    body = f"data: {last}\n\ndata: [DONE]"
+    handler = lambda _: httpx.Response(200, text=body)
+    assert run(handler, collect)[-1]["usage"] == USAGE
+
+
+def test_a_stalled_stream_times_out() -> None:
+    async def stall(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n")
+        await asyncio.sleep(5)
+
+    async def go() -> None:
+        server = await asyncio.start_server(stall, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            async with Ai(f"http://127.0.0.1:{port}", "svc", timeout=0.2) as ai:
+                await collect(ai)
+        finally:
+            server.close()
+
+    with pytest.raises(AiTimeoutError):
+        asyncio.run(go())
+
+
+def test_usage_rejects_a_naive_datetime_and_read_calls_send_the_end_user_token() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    with pytest.raises(ValueError):
+        run(handler, lambda ai: ai.usage(start=datetime(2026, 1, 1)))
+    assert seen == []
+    run(
+        handler,
+        lambda ai: ai.usage(start=datetime(2026, 1, 1, tzinfo=UTC), end_user_token="user"),
+    )
+    assert seen[0].headers["bae6-end-user-token"] == "user"
+    assert seen[0].url.params["from"] == "2026-01-01T00:00:00+00:00"

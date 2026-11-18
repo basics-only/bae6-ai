@@ -86,7 +86,7 @@ def _invalid_response() -> AiApiError:
 def _parse(text: bytes) -> object:
     try:
         return json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
 
 
@@ -168,6 +168,8 @@ class Ai:
             "/v1/chat/completions",
             json=payload,
             headers=_headers(end_user_token, None),
+            # Bounds connecting, the wait for the answer, and each gap between chunks.
+            timeout=httpx.Timeout(self._timeout),
         )
         try:
             response = await self._http.send(request, stream=True)
@@ -213,25 +215,38 @@ class Ai:
             raise _invalid_response()
         return body
 
-    async def models(self) -> list[dict[str, Any]]:
-        body = await self._call("GET", "/v1/models", None, None, None)
+    async def models(self, *, end_user_token: str | None = None) -> list[dict[str, Any]]:
+        body = await self._call("GET", "/v1/models", end_user_token, None, None)
         if not isinstance(body.get("data"), list):
             raise _invalid_response()
         return body["data"]
 
     async def usage(
-        self, *, start: datetime | None = None, end: datetime | None = None
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        end_user_token: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Usage of this application, by model and outcome, in [start, end) (at most 93 days)."""
-        params = {k: v.isoformat() for k, v in (("from", start), ("to", end)) if v is not None}
-        body = await self._call("GET", "/v1/usage", None, None, None, params)
+        """Usage of this application, by model and outcome, in [start, end) (at most 93 days).
+
+        Datetimes must be timezone-aware; a naive one has no unambiguous instant.
+        """
+        params = {}
+        for key, value in (("from", start), ("to", end)):
+            if value is None:
+                continue
+            if value.utcoffset() is None:
+                raise ValueError(f"{key} must be a timezone-aware datetime")
+            params[key] = value.isoformat()
+        body = await self._call("GET", "/v1/usage", end_user_token, None, None, params)
         if not isinstance(body.get("data"), list):
             raise _invalid_response()
         return body["data"]
 
-    async def budget(self) -> dict[str, Any]:
+    async def budget(self, *, end_user_token: str | None = None) -> dict[str, Any]:
         """Money values are decimal strings in the price book's currency."""
-        body = await self._call("GET", "/v1/budgets", None, None, None)
+        body = await self._call("GET", "/v1/budgets", end_user_token, None, None)
         if not isinstance(body.get("limit"), str) or not isinstance(body.get("spent"), str):
             raise _invalid_response()
         return body
@@ -296,6 +311,8 @@ def _headers(end_user_token: str | None, idempotency_key: str | None) -> dict[st
 
 def _transport(e: httpx.HTTPError) -> AiTransportError:
     # Raised `from None`: the cause can quote a header value, i.e. a token.
+    if isinstance(e, httpx.TimeoutException):
+        return AiTimeoutError(f"the gateway did not answer in time ({type(e).__name__})")
     return AiTransportError(f"could not reach the gateway ({type(e).__name__})")
 
 
@@ -311,11 +328,17 @@ async def _read(response: httpx.Response) -> bytes:
 
 
 async def _lines(response: httpx.Response) -> AsyncIterator[str]:
+    """Lines without endings, including a last unterminated one."""
+    oversized = "the gateway sent an oversized stream event"
     buffered = ""
     async for text in response.aiter_text():
         buffered += text
         *complete, buffered = buffered.split("\n")
         for line in complete:
+            if len(line) > MAX_SSE_LINE:
+                raise AiTransportError(oversized)
             yield line.removesuffix("\r")
         if len(buffered) > MAX_SSE_LINE:
-            raise AiTransportError("the gateway sent an oversized stream event")
+            raise AiTransportError(oversized)
+    if buffered:
+        yield buffered.removesuffix("\r")

@@ -8,6 +8,7 @@ import {
   AiApiError,
   AiAuthError,
   AiBudgetError,
+  AiTimeoutError,
   AiTransportError,
 } from "./index.js";
 
@@ -117,4 +118,41 @@ test("a transport error does not carry a token, even in its cause chain", async 
     .catch((e: unknown) => e);
   assert.ok(err instanceof AiTransportError);
   assert.ok(!inspect(err, { depth: 10 }).includes("SECRET"));
+});
+
+test("reads a last stream line sent without a newline", async () => {
+  reply = (res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(
+      `data: ${JSON.stringify({ id: "c", model: "m", choices: [], usage })}\n\ndata: [DONE]`,
+    );
+  };
+  const chunks = [];
+  for await (const chunk of ai.chatStream(req)) chunks.push(chunk);
+  assert.deepEqual(chunks[0]?.usage, usage);
+});
+
+test("a stream that stalls times out instead of hanging", async () => {
+  const stalled = new Ai({
+    baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    credentials: "svc",
+    timeoutMs: 200,
+  });
+  reply = (res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(": open\n\n");
+  };
+  await assert.rejects(async () => {
+    for await (const _ of stalled.chatStream(req));
+  }, AiTimeoutError);
+});
+
+test("an oversized response is reported as too large", async () => {
+  reply = (res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    const mb = Buffer.alloc(1024 * 1024, 0x20);
+    for (let i = 0; i < 65; i++) res.write(mb);
+    res.end("{}");
+  };
+  await assert.rejects(ai.chat(req), /too large/);
 });
