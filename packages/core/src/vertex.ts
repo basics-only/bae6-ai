@@ -45,7 +45,8 @@ function usageOf(u: Record<string, unknown> | undefined): Usage {
   // The total includes thinking tokens, which candidatesTokenCount leaves out but are billed as output.
   const outputTokens =
     u?.totalTokenCount === undefined
-      ? count(u?.candidatesTokenCount)
+      ? count(u?.candidatesTokenCount) +
+        (u?.thoughtsTokenCount === undefined ? 0 : count(u.thoughtsTokenCount))
       : count(u.totalTokenCount) - inputTokens;
   return { inputTokens, outputTokens: count(outputTokens) };
 }
