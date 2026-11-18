@@ -1,0 +1,491 @@
+openapi: 3.1.0
+info:
+  title: bae6-ai gateway API
+  version: 1.0.0
+  summary: Metered, tenant-scoped access to Bedrock and Vertex models.
+  description: |
+    The chat and embeddings endpoints accept a strict subset of the OpenAI wire format.
+    An unknown field is `400 unsupported_parameter`, never silently ignored.
+
+    **Identity.** The workload is identified by its bearer token. The organization and
+    application come from the token's issuer configuration, never from claims or bodies.
+    With `Bae6-End-User-Token` the user becomes the subject; both tokens must map to the
+    same organization and application, else `401`. Scopes always come from the workload token.
+
+    **Tenancy.** A model limited to other organizations is `404 not_found`, the same as one
+    that does not exist.
+
+    **Metering.** Every call reserves budget before reaching a provider. An organization
+    with no budget configured is `403 forbidden`; one whose budget the reservation would
+    exceed is `402 budget_exceeded`. If metering is unavailable the call fails closed
+    with `503`. A call whose outcome is unknown is charged at its reservation.
+
+    **Request IDs.** Every response carries `X-Request-Id`, equal to the `requestId` in an
+    error body, except a replayed error, which keeps the original request's `requestId`.
+    A caller-supplied `X-Request-Id` matching `^[A-Za-z0-9._-]{1,64}$` is reused.
+
+    **Bodies** are at most 8 MiB, else `413 payload_too_large`.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: http://localhost:8080
+    description: Local development
+security:
+  - bearer: []
+paths:
+  /health/live:
+    $ref: "./vendor/openapi/common.yaml#/paths/~1health~1live"
+  /health/ready:
+    $ref: "./vendor/openapi/common.yaml#/paths/~1health~1ready"
+  /v1/models:
+    get:
+      operationId: listModels
+      summary: Models the caller's organization may use. Needs `ai:invoke`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: The models.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelList"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/chat/completions:
+    post:
+      operationId: createChatCompletion
+      summary: One chat completion, or a server-sent event stream with `stream`. Needs `ai:invoke`.
+      description: |
+        `Idempotency-Key` is not supported with `stream`. A replayed response, success or a
+        possibly billed `502`/`504`, carries `Idempotent-Replayed: true`. At most 20 images
+        per request. A stream that fails after it started ends with one
+        `data: {"error": ErrorEnvelope}` event and no `[DONE]`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+      responses:
+        "200":
+          description: "The completion, or a stream of `data:` lines ending with `data: [DONE]`."
+          headers:
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletion"
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/ChatCompletionChunk"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "402":
+          $ref: "#/components/responses/BudgetExceeded"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/ProviderError"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /v1/embeddings:
+    post:
+      operationId: createEmbeddings
+      summary: Embeds 1 to 16 strings. Needs `ai:invoke`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmbeddingsRequest"
+      responses:
+        "200":
+          description: One vector per input, in input order.
+          headers:
+            Idempotent-Replayed:
+              $ref: "#/components/headers/IdempotentReplayed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Embeddings"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "402":
+          $ref: "#/components/responses/BudgetExceeded"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/RateLimited"
+        "502":
+          $ref: "#/components/responses/ProviderError"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+        "504":
+          $ref: "#/components/responses/Timeout"
+  /v1/budgets:
+    get:
+      operationId: getBudget
+      summary: The organization's budget for the current UTC month. Needs `ai:usage:read`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: The budget.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Budget"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/usage:
+    get:
+      operationId: getUsage
+      summary: The caller's application's usage, grouped by model and outcome. Needs `ai:usage:read`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - name: from
+          in: query
+          description: Inclusive. Defaults to the start of the current UTC month.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: Exclusive. Defaults to now. Not before `from`, and at most 93 days after it.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: The usage.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Usage"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+components:
+  securitySchemes:
+    bearer:
+      $ref: "./vendor/openapi/common.yaml#/components/securitySchemes/bearer"
+  parameters:
+    EndUserToken:
+      name: Bae6-End-User-Token
+      in: header
+      description: Optional verified user token; the user becomes the subject.
+      schema:
+        type: string
+        maxLength: 8192
+  headers:
+    IdempotentReplayed:
+      description: "`true` when this is the stored answer to an earlier request with the same key."
+      schema:
+        type: string
+        enum: ["true"]
+  responses:
+    InvalidRequest:
+      description: |
+        Not retryable. Codes: `invalid_request`, `unsupported_parameter`,
+        `unsupported_operation`, `unsupported_modality`, `context_too_large`,
+        `provider_rejected`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    BudgetExceeded:
+      description: "`budget_exceeded`: the reservation would exceed this month's budget."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    IdempotencyConflict:
+      description: |
+        `conflict`: a request with this key is in progress, retry later.
+        `idempotency_key_reused`: the key was used for a different body.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ProviderError:
+      description: "`provider_error`: the provider call failed. It may have been billed."
+      headers:
+        Idempotent-Replayed:
+          $ref: "#/components/headers/IdempotentReplayed"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Timeout:
+      description: "`timeout`: the provider did not answer in time. It may have been billed."
+      headers:
+        Idempotent-Replayed:
+          $ref: "#/components/headers/IdempotentReplayed"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    ErrorEnvelope:
+      $ref: "./vendor/schemas/error-envelope.json"
+    Decimal:
+      description: An exact decimal amount, as a string.
+      type: string
+      pattern: "^-?[0-9]+(\\.[0-9]+)?$"
+    TokenUsage:
+      type: object
+      required: [prompt_tokens, total_tokens]
+      properties:
+        prompt_tokens: { type: integer, minimum: 0 }
+        completion_tokens: { type: integer, minimum: 0 }
+        total_tokens: { type: integer, minimum: 0 }
+    ModelList:
+      type: object
+      required: [object, data]
+      properties:
+        object: { const: list }
+        data:
+          type: array
+          items:
+            type: object
+            required: [id, object, owned_by, capabilities]
+            properties:
+              id: { type: string }
+              object: { const: model }
+              owned_by: { enum: [bedrock, vertex] }
+              capabilities:
+                $ref: "./vendor/schemas/capability-descriptor.json"
+    ContentPart:
+      oneOf:
+        - type: object
+          required: [type, text]
+          additionalProperties: false
+          properties:
+            type: { const: text }
+            text: { type: string }
+        - type: object
+          required: [type, image_url]
+          additionalProperties: false
+          properties:
+            type: { const: image_url }
+            image_url:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  description: Inline only; remote URLs are refused.
+                  type: string
+                  pattern: "^data:image/(png|jpeg|gif|webp);base64,"
+    ChatRequest:
+      type: object
+      required: [model, messages]
+      additionalProperties: false
+      properties:
+        model: { type: string }
+        messages:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            type: object
+            required: [role, content]
+            additionalProperties: false
+            properties:
+              role:
+                description: "`developer` is treated as `system`."
+                enum: [system, developer, user, assistant]
+              content:
+                oneOf:
+                  - type: string
+                  - type: array
+                    minItems: 1
+                    maxItems: 64
+                    items:
+                      $ref: "#/components/schemas/ContentPart"
+        max_tokens:
+          description: Defaults to the smaller of 1024 and the model's limit.
+          type: integer
+          minimum: 1
+        max_completion_tokens:
+          description: Takes precedence over `max_tokens`.
+          type: integer
+          minimum: 1
+        temperature: { type: number, minimum: 0, maximum: 2 }
+        stream: { type: boolean }
+        stream_options:
+          type: object
+          additionalProperties: false
+          properties:
+            include_usage: { type: boolean }
+    ChatCompletion:
+      type: object
+      required: [id, object, created, model, choices, usage]
+      properties:
+        id: { type: string }
+        object: { const: chat.completion }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: object
+            required: [index, message, finish_reason]
+            properties:
+              index: { const: 0 }
+              message:
+                type: object
+                required: [role, content]
+                properties:
+                  role: { const: assistant }
+                  content: { type: string }
+              finish_reason: { enum: [stop, length] }
+        usage:
+          $ref: "#/components/schemas/TokenUsage"
+    ChatCompletionChunk:
+      description: The JSON of one `data:` event.
+      type: object
+      required: [id, object, created, model, choices]
+      properties:
+        id: { type: string }
+        object: { const: chat.completion.chunk }
+        created: { type: integer }
+        model: { type: string }
+        choices:
+          description: Empty only in the final usage chunk.
+          type: array
+          maxItems: 1
+          items:
+            type: object
+            required: [index, delta, finish_reason]
+            properties:
+              index: { const: 0 }
+              delta:
+                type: object
+                properties:
+                  role: { const: assistant }
+                  content: { type: string }
+              finish_reason:
+                enum: [stop, length, null]
+        usage:
+          $ref: "#/components/schemas/TokenUsage"
+    EmbeddingsRequest:
+      type: object
+      required: [model, input]
+      additionalProperties: false
+      properties:
+        model: { type: string }
+        input:
+          oneOf:
+            - type: string
+              minLength: 1
+              maxLength: 32000
+            - type: array
+              minItems: 1
+              maxItems: 16
+              items:
+                type: string
+                minLength: 1
+                maxLength: 32000
+        encoding_format: { const: float }
+    Embeddings:
+      type: object
+      required: [object, data, model, usage]
+      properties:
+        object: { const: list }
+        data:
+          type: array
+          items:
+            type: object
+            required: [object, index, embedding]
+            properties:
+              object: { const: embedding }
+              index: { type: integer, minimum: 0 }
+              embedding:
+                type: array
+                items: { type: number }
+        model: { type: string }
+        usage:
+          $ref: "#/components/schemas/TokenUsage"
+    Budget:
+      type: object
+      required: [period, limit, spent, reserved]
+      properties:
+        period:
+          description: UTC month, `YYYY-MM`.
+          type: string
+          pattern: "^[0-9]{4}-[0-9]{2}$"
+        limit: { $ref: "#/components/schemas/Decimal" }
+        spent: { $ref: "#/components/schemas/Decimal" }
+        reserved:
+          description: Held by calls still in flight.
+          allOf:
+            - $ref: "#/components/schemas/Decimal"
+    Usage:
+      type: object
+      required: [from, to, data]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        data:
+          type: array
+          items:
+            type: object
+            required: [model, outcome, requests, inputTokens, outputTokens, cost]
+            properties:
+              model: { type: string }
+              outcome:
+                description: "`uncertain` calls are charged at their reservation."
+                enum: [measured, uncertain, failed]
+              requests: { type: integer, minimum: 0 }
+              inputTokens: { type: integer, minimum: 0 }
+              outputTokens: { type: integer, minimum: 0 }
+              cost: { $ref: "#/components/schemas/Decimal" }

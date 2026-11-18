@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { join, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { type ModelProvider, ProviderError } from "@bae6/ai-core";
+import AjvModule from "ajv/dist/2020.js";
+import { parse } from "yaml";
 import type { ModelConfig } from "./config.js";
 import type { Identity } from "./identity.js";
 import type { Ledger, Outcome } from "./ledger.js";
@@ -28,6 +32,22 @@ const ledger = {
   release: async () => {
     keys.push("release");
   },
+  budget: async () => ({
+    period: "2026-11",
+    limit: "10",
+    spent: "1.5",
+    reserved: "0",
+  }),
+  usage: async () => [
+    {
+      model: "m",
+      outcome: "measured",
+      requests: 2,
+      inputTokens: 6,
+      outputTokens: 4,
+      cost: "0.0001",
+    },
+  ],
 } as unknown as Ledger;
 
 const config: ModelConfig = {
@@ -44,7 +64,13 @@ const config: ModelConfig = {
 
 const usage = { inputTokens: 3, outputTokens: 2 };
 const provider = {
-  descriptor: {},
+  descriptor: {
+    kind: "model",
+    id: "m",
+    operations: ["chat", "chat_stream"],
+    limits: { maxInputTokens: 1000, maxOutputTokens: 100 },
+    attributes: { provider: "bedrock", inputModalities: ["text"] },
+  },
   chat: async () => {
     if (fail) throw fail;
     return { text: "hello", finishReason: "stop", usage };
@@ -77,6 +103,13 @@ const identities: Record<string, Identity> = {
     organizationId: "acme",
     applicationId: "crm",
     scopes: [],
+  },
+  reader: {
+    subjectId: "svc",
+    subjectType: "workload",
+    organizationId: "acme",
+    applicationId: "crm",
+    scopes: ["ai:invoke", "ai:usage:read"],
   },
   nobudget: {
     subjectId: "svc",
@@ -189,4 +222,85 @@ test("an idempotency key is freed when nothing was billed, and kept when it may 
   assert.equal((await post("acme", hi, "key-00003")).status, 503);
   ledgerDown = false;
   assert.deepEqual(keys, ["release", "complete 502", "release"]);
+});
+
+const contracts = resolve(import.meta.dirname, "../../../contracts");
+const spec = parse(
+  readFileSync(join(contracts, "openapi.yaml"), "utf8")
+    // The vendored schemas are the release published under these $ids.
+    .replaceAll(
+      "./vendor/schemas/",
+      "https://github.com/basics-only/bae6-contracts/schemas/",
+    ),
+);
+const ajv = new AjvModule.default({ strict: false, validateFormats: false });
+for (const f of readdirSync(join(contracts, "vendor/schemas"))) {
+  ajv.addSchema(
+    JSON.parse(readFileSync(join(contracts, "vendor/schemas", f), "utf8")),
+  );
+}
+ajv.addSchema(spec, "openapi");
+function conforms(schema: string, body: unknown) {
+  const validate = ajv.getSchema(`openapi#/components/schemas/${schema}`);
+  assert.ok(validate, schema);
+  assert.ok(
+    validate(body),
+    `${schema}: ${JSON.stringify(validate.errors)} ${JSON.stringify(body)}`,
+  );
+}
+const call = (method: string, path: string, token: string, body?: unknown) =>
+  fetch(`${base}${path}`, {
+    method,
+    headers: { authorization: `Bearer ${token}` },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+
+test("every documented route is served", async () => {
+  const routes = Object.entries(spec.paths as Record<string, object>).flatMap(
+    ([path, item]) =>
+      "$ref" in item
+        ? [["GET", path]]
+        : Object.keys(item).map((m) => [m.toUpperCase(), path]),
+  );
+  assert.equal(routes.length, 7);
+  for (const [method, path] of routes) {
+    const body = method === "POST" ? {} : undefined;
+    const res = await call(method as string, path as string, "noscope", body);
+    assert.notEqual(res.status, 404, `${method} ${path}`);
+  }
+});
+
+test("responses conform to the contract", async () => {
+  conforms("ChatCompletion", await (await post("acme", hi)).json());
+  const stream = await (
+    await post("acme", {
+      ...hi,
+      stream: true,
+      stream_options: { include_usage: true },
+    })
+  ).text();
+  const events = stream
+    .split("\n\n")
+    .filter((e) => e.startsWith("data: {"))
+    .map((e) => JSON.parse(e.slice(6)));
+  assert.equal(events.length, 5);
+  for (const e of events) conforms("ChatCompletionChunk", e);
+  conforms("ModelList", await (await call("GET", "/v1/models", "acme")).json());
+  conforms("Budget", await (await call("GET", "/v1/budgets", "reader")).json());
+  conforms("Usage", await (await call("GET", "/v1/usage", "reader")).json());
+  for (const [res, status, code] of [
+    [await post(undefined, hi), 401, "unauthenticated"],
+    [await post("noscope", hi), 403, "forbidden"],
+    [await post("globex", hi), 404, "not_found"],
+    [await post("acme", { ...hi, tools: [] }), 400, "unsupported_parameter"],
+    [
+      await call("GET", "/v1/usage?from=nonsense", "reader"),
+      400,
+      "invalid_request",
+    ],
+  ] as const) {
+    const body = await res.json();
+    assert.deepEqual([res.status, body.code], [status, code]);
+    conforms("ErrorEnvelope", body);
+  }
 });
