@@ -1,0 +1,9 @@
+FROM node:22.21-alpine@sha256:0340fa682d72068edf603c305bfbc10e23219fb0e40df58d9ea4d6f33a9798bf
+RUN corepack enable
+WORKDIR /app
+COPY . .
+RUN pnpm install --frozen-lockfile --filter @bae6/ai-gateway...
+RUN pnpm --filter @bae6/ai-gateway... build
+ENV NODE_ENV=production
+USER node
+CMD ["node", "services/gateway/dist/main.js"]

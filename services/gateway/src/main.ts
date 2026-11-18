@@ -37,8 +37,12 @@ if (!Array.isArray(issuers)) {
   );
 }
 const configFile = env.BAE6_AI_CONFIG_FILE;
-if (!configFile) throw new Error("BAE6_AI_CONFIG_FILE is required");
-const config = parseConfig(JSON.parse(readFileSync(configFile, "utf8")));
+const rawConfig =
+  env.BAE6_AI_CONFIG ?? (configFile && readFileSync(configFile, "utf8"));
+if (!rawConfig) {
+  throw new Error("BAE6_AI_CONFIG or BAE6_AI_CONFIG_FILE is required");
+}
+const config = parseConfig(JSON.parse(rawConfig));
 
 const port = int("PORT", 8080, 1, 65535);
 const timeoutMs = int("BAE6_PROVIDER_TIMEOUT_MS", 60_000, 1000, 300_000);
