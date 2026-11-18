@@ -179,6 +179,69 @@ test("compare reports drops and missing cases but not improvements", () => {
   ]);
 });
 
+test("compare rejects bad tolerance and treats NaN scores as regressions", () => {
+  for (const t of [Number.NaN, Number.POSITIVE_INFINITY, -0.1]) {
+    assert.throws(() => compare(report({ a: 1 }), report({ a: 1 }), t));
+  }
+  assert.equal(compare(report({ a: 1 }), report({ a: Number.NaN })).length, 1);
+});
+
+test("compare separates errored cases from score drops", () => {
+  const errored = report({ a: 0 });
+  const [first] = errored.cases;
+  if (first) first.status = "error";
+  assert.deepEqual(compare(report({ a: 1 }), errored), [
+    { caseId: "a", scorer: "exact", before: 1, after: "error" },
+  ]);
+  assert.deepEqual(compare(errored, report({ a: 0 })), []);
+});
+
+test("a failing scorer keeps the task cost", async () => {
+  const r = await runEval({
+    ...base,
+    scorers: [{ name: "bad", score: () => Number.NaN }],
+  });
+  assert.equal(r.failures, 3);
+  assert.equal(r.totalCost, 1.5);
+});
+
+test("exactMatch ignores key order and distinguishes undefined and BigInt", async () => {
+  const s = exactMatch<unknown, unknown>();
+  assert.equal(s.score({ a: 1, b: 2 }, { b: 2, a: 1 }, null), 1);
+  assert.equal(s.score({ a: undefined }, {}, null), 0);
+  assert.equal(s.score(1n, 1n, null), 1);
+});
+
+test("a task throwing 'timeout' is an error, not a timeout", async () => {
+  const r = await runEval({
+    ...base,
+    task: async () => {
+      throw new Error("timeout");
+    },
+  });
+  assert.equal(r.cases[0]?.status, "error");
+});
+
+test("fails the run when tasks keep ignoring the abort signal", async () => {
+  await assert.rejects(
+    runEval({
+      ...base,
+      dataset: {
+        name: "many",
+        version: "1",
+        cases: Array.from({ length: 200 }, (_, n) => ({
+          id: String(n),
+          input: "x",
+          expected: "X",
+        })),
+      },
+      caseTimeoutMs: 5,
+      task: () => new Promise<never>(() => {}),
+    }),
+    /ignored their abort signal/,
+  );
+});
+
 test("compare applies tolerance and refuses a different dataset version", () => {
   assert.deepEqual(compare(report({ a: 1 }), report({ a: 0.95 }), 0.1), []);
   assert.throws(() => compare(report({ a: 1 }), report({ a: 1 }, "2")));

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 export interface Case<I = unknown, E = unknown> {
   id: string;
@@ -63,8 +64,10 @@ export interface Regression {
   caseId: string;
   scorer: string;
   before: number;
-  after: number | "missing";
+  after: number | "missing" | "error";
 }
+
+class DeadlineError extends Error {}
 
 const MAX_CASES = 10_000;
 const MAX_CONCURRENCY = 16;
@@ -73,8 +76,7 @@ const MAX_ERROR_CHARS = 300;
 
 export const exactMatch = <I, E>(): Scorer<I, E, E> => ({
   name: "exact",
-  score: (output, expected) =>
-    JSON.stringify(output) === JSON.stringify(expected) ? 1 : 0,
+  score: (output, expected) => (isDeepStrictEqual(output, expected) ? 1 : 0),
 });
 
 export const schemaValid = <I, E, O>(
@@ -118,6 +120,7 @@ function checkOptions<I, E, O>(o: RunOptions<I, E, O>): void {
   }
 }
 
+// shortcut: sync loops in tasks or scorers starve the timer, run them in a child process if untrusted
 async function withDeadline<T>(
   work: (signal: AbortSignal) => Promise<T>,
   ms: number,
@@ -132,7 +135,7 @@ async function withDeadline<T>(
   }, ms);
   let onAbort = () => {};
   const aborted = new Promise<never>((_, reject) => {
-    onAbort = () => reject(new Error(timedOut ? "timeout" : "aborted"));
+    onAbort = () => reject(new DeadlineError(timedOut ? "timeout" : "aborted"));
     signal.addEventListener("abort", onAbort, { once: true });
   });
   try {
@@ -150,6 +153,8 @@ export async function runEval<I, E, O>(
   const startedAt = new Date().toISOString();
   const results: CaseResult[] = new Array(o.dataset.cases.length);
   let next = 0;
+  let outstanding = 0;
+  let stuck = false;
 
   const zero = () =>
     Object.fromEntries(o.scorers.map((s) => [s.name, 0])) as Record<
@@ -167,12 +172,28 @@ export async function runEval<I, E, O>(
       cost: null,
       ...r,
     });
+    let cost: number | null = null;
     try {
       const res = await withDeadline(
-        (signal) => o.task(c.input, { signal, seed: o.seed }),
+        (signal) => {
+          const p = o.task(c.input, { signal, seed: o.seed });
+          outstanding++;
+          const settled = () => {
+            outstanding--;
+          };
+          p.then(settled, settled);
+          return p;
+        },
         o.caseTimeoutMs,
         o.signal,
       );
+      if (
+        typeof res.cost === "number" &&
+        Number.isFinite(res.cost) &&
+        res.cost >= 0
+      ) {
+        cost = res.cost;
+      }
       const scores: Record<string, number> = {};
       for (const s of o.scorers) {
         const v = s.score(res.output, c.expected, c.input);
@@ -181,24 +202,21 @@ export async function runEval<I, E, O>(
         }
         scores[s.name] = v;
       }
-      const cost =
-        typeof res.cost === "number" &&
-        Number.isFinite(res.cost) &&
-        res.cost >= 0
-          ? res.cost
-          : null;
       return finish({ scores, cost });
     } catch (e) {
       const msg = e instanceof Error ? e.message : "task failed";
+      const timedOut = e instanceof DeadlineError && msg === "timeout";
+      if (timedOut && outstanding > o.concurrency * 2) stuck = true;
       return finish({
-        status: msg === "timeout" ? "timeout" : "error",
+        status: timedOut ? "timeout" : "error",
         error: msg.slice(0, MAX_ERROR_CHARS),
+        cost,
       });
     }
   }
 
   async function worker(): Promise<void> {
-    while (next < o.dataset.cases.length && !o.signal.aborted) {
+    while (next < o.dataset.cases.length && !o.signal.aborted && !stuck) {
       const i = next++;
       const c = o.dataset.cases[i];
       if (c) results[i] = await runCase(c);
@@ -212,6 +230,7 @@ export async function runEval<I, E, O>(
     ),
   );
   if (o.signal.aborted) throw new Error("eval aborted");
+  if (stuck) throw new Error("too many tasks ignored their abort signal");
 
   const mean: Record<string, number> = {};
   for (const s of o.scorers) {
@@ -245,19 +264,22 @@ export function compare(
   ) {
     throw new Error("reports are for different dataset versions");
   }
+  if (!Number.isFinite(tolerance) || tolerance < 0) {
+    throw new RangeError("tolerance must be finite and >= 0");
+  }
   const now = new Map(current.cases.map((c) => [c.id, c]));
   const out: Regression[] = [];
   for (const b of baseline.cases) {
+    if (b.status !== "ok") continue;
     const c = now.get(b.id);
     for (const [scorer, before] of Object.entries(b.scores)) {
-      if (!c) out.push({ caseId: b.id, scorer, before, after: "missing" });
-      else {
-        const after = c.scores[scorer];
-        if (after === undefined) {
-          out.push({ caseId: b.id, scorer, before, after: "missing" });
-        } else if (after < before - tolerance) {
-          out.push({ caseId: b.id, scorer, before, after });
-        }
+      const after = c?.scores[scorer];
+      if (!c || after === undefined) {
+        out.push({ caseId: b.id, scorer, before, after: "missing" });
+      } else if (c.status !== "ok") {
+        out.push({ caseId: b.id, scorer, before, after: "error" });
+      } else if (!(Number.isFinite(after) && after >= before - tolerance)) {
+        out.push({ caseId: b.id, scorer, before, after });
       }
     }
   }
