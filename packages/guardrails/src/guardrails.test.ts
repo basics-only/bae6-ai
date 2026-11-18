@@ -98,3 +98,91 @@ test("a tool named like an object prototype key has no policy", () => {
   const t = { ...echo("x"), name: "constructor" };
   assert.throws(() => guardTools([t], {}), /no policy/);
 });
+
+test("finds secrets after JSON-escaped whitespace and in keys", () => {
+  const t = tool("ok");
+  assert.throws(() => t.parse({ q: "x\nAKIAABCDEFGHIJKLMNOP" }), /aws-key/);
+  assert.throws(
+    () => t.parse({ q: "x\tsk-aaaaaaaaaaaaaaaaaaaaaaaa" }),
+    /api-key/,
+  );
+  assert.throws(() => t.parse({ AKIAABCDEFGHIJKLMNOP: 1 }), /aws-key/);
+});
+
+test("rejects circular, bigint and too deep input", () => {
+  const t = tool("ok");
+  const loop: Record<string, unknown> = {};
+  loop.self = loop;
+  assert.throws(() => t.parse(loop), /circular/);
+  assert.throws(() => t.parse({ n: 1n }), /plain data/);
+  let deep: unknown = "x";
+  for (let i = 0; i < 40; i++) deep = [deep];
+  assert.throws(() => t.parse(deep), /too deep/);
+});
+
+test("detects a card number next to other digits", () => {
+  assert.equal(
+    redact("order 12 4111111111111111", piiDetectors),
+    "order [REDACTED:card]",
+  );
+});
+
+test("redacts the whole private key block", () => {
+  const key =
+    "-----BEGIN RSA PRIVATE KEY-----\nMIIEvQ\n-----END RSA PRIVATE KEY-----";
+  assert.equal(
+    redact(`k ${key} z`, secretDetectors),
+    "k [REDACTED:private-key] z",
+  );
+});
+
+test("rejects non-global detectors and non-array detector lists", () => {
+  const bad = { name: "n", pattern: /x/ };
+  assert.throws(
+    () => guardTools([echo("x")], { echo: { ...policy, output: [bad] } }),
+    RangeError,
+  );
+  assert.throws(
+    () =>
+      guardTools([echo("x")], {
+        echo: { ...policy, input: undefined as never },
+      }),
+    RangeError,
+  );
+});
+
+test("keeps requiresApproval and description from class-based tools", () => {
+  class T {
+    name = "echo";
+    get requiresApproval() {
+      return true;
+    }
+    get description() {
+      return "d";
+    }
+    parse(i: unknown) {
+      return i;
+    }
+    async run(_i: unknown, _s: AbortSignal) {
+      return "ok";
+    }
+  }
+  const [g] = guardTools([new T()], { echo: policy });
+  assert.equal(g?.requiresApproval, true);
+  assert.equal(g?.description, "d");
+});
+
+test("rejects redacted output that grows past the bound", async () => {
+  const t = tool("a@b.co ".repeat(12), { ...policy, maxOutputChars: 90 });
+  await assert.rejects(t.run({ q: "x" }, signal), /size bound/);
+});
+
+test("later changes to the policy or shared detectors do not weaken a guard", async () => {
+  const p: Policy = { ...policy, input: [...secretDetectors], maxCalls: 1 };
+  const t = tool("ok", p);
+  p.maxCalls = 1000;
+  p.input.length = 0;
+  await t.run({ q: "x" }, signal);
+  await assert.rejects(t.run({ q: "x" }, signal), /budget spent/);
+  assert.throws(() => t.parse({ q: "AKIAABCDEFGHIJKLMNOP" }), /aws-key/);
+});
