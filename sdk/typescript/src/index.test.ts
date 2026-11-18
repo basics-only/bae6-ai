@@ -156,3 +156,23 @@ test("an oversized response is reported as too large", async () => {
   };
   await assert.rejects(ai.chat(req), /too large/);
 });
+
+test("a slow consumer does not trip the stream timeout", async () => {
+  const quick = new Ai({
+    baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    credentials: "svc",
+    timeoutMs: 100,
+  });
+  const c = JSON.stringify({ id: "c", model: "m", choices: [] });
+  reply = sse([
+    c,
+    JSON.stringify({ id: "c", model: "m", choices: [], usage }),
+    "[DONE]",
+  ]);
+  let n = 0;
+  for await (const _ of quick.chatStream(req)) {
+    n++;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  assert.equal(n, 2);
+});
