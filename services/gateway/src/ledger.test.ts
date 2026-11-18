@@ -182,3 +182,54 @@ test(
     }
   },
 );
+
+test(
+  "three replicas sharing a budget never overspend it",
+  { skip },
+  async () => {
+    const pools = Array.from(
+      { length: 3 },
+      () => new pg.Pool({ connectionString: url, max: 10 }),
+    );
+    try {
+      const replicas = pools.map((p) =>
+        createLedger(p, { priceBookVersion: "test-v1" }),
+      );
+      const c = caller();
+      const race = () =>
+        Promise.all(
+          Array.from({ length: 30 }, async (_, i) => {
+            const requestId = `led_${randomUUID()}`;
+            const held = await replicas[i % 3]?.reserve({
+              requestId,
+              caller: c,
+              limit: "5",
+              provider: "bedrock",
+              modelId: "m",
+              inputTokens: 1_000_000,
+              maxOutputTokens: 0,
+              leaseMs: 60_000,
+            });
+            return held === null ? null : requestId;
+          }),
+        ).then((ids) => ids.filter((id) => id !== null));
+
+      const first = await race();
+      assert.equal(first.length, 5);
+      // Settle each on a different replica than reserved it: half the estimate.
+      await Promise.all(
+        first.map((id, i) =>
+          replicas[(i + 1) % 3]?.finalize(id, {
+            kind: "measured",
+            usage: { inputTokens: 500_000, outputTokens: 0 },
+          }),
+        ),
+      );
+      assert.equal((await race()).length, 2);
+      const b = await ledger.budget(c.organizationId);
+      assert.deepEqual([Number(b.spent), Number(b.reserved)], [2.5, 2]);
+    } finally {
+      await Promise.all(pools.map((p) => p.end()));
+    }
+  },
+);
