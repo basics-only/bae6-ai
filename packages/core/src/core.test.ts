@@ -419,6 +419,7 @@ test("a Bedrock embedding that fails after earlier inputs were billed may have b
 
 test("Vertex bills thinking tokens, reads an unterminated last line, and a stream with no finish may be billed", async () => {
   let finished = true;
+  let withTotal = true;
   const server = await mock((s, res) => {
     if (s.path.endsWith(":generateContent")) {
       return sendJson(res, 200, {
@@ -429,7 +430,7 @@ test("Vertex bills thinking tokens, reads an unterminated last line, and a strea
           promptTokenCount: 9,
           candidatesTokenCount: 2,
           thoughtsTokenCount: 5,
-          totalTokenCount: 16,
+          ...(withTotal ? { totalTokenCount: 16 } : {}),
         },
       });
     }
@@ -449,6 +450,11 @@ test("Vertex bills thinking tokens, reads an unterminated last line, and a strea
       token: async () => "ya29.test",
       endpoint: server.url,
     });
+    assert.deepEqual((await p.chat(request())).usage, {
+      inputTokens: 9,
+      outputTokens: 7,
+    });
+    withTotal = false;
     assert.deepEqual((await p.chat(request())).usage, {
       inputTokens: 9,
       outputTokens: 7,
