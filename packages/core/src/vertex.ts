@@ -42,12 +42,32 @@ const textOf = (c: Chunk) =>
 
 function usageOf(u: Record<string, unknown> | undefined): Usage {
   const inputTokens = count(u?.promptTokenCount);
-  // Vertex omits candidatesTokenCount when nothing was generated; the total still says so.
+  // The total includes thinking tokens, which candidatesTokenCount leaves out but are billed as output.
   const outputTokens =
-    u?.candidatesTokenCount === undefined
-      ? count(u?.totalTokenCount) - inputTokens
-      : count(u.candidatesTokenCount);
+    u?.totalTokenCount === undefined
+      ? count(u?.candidatesTokenCount)
+      : count(u.totalTokenCount) - inputTokens;
   return { inputTokens, outputTokens: count(outputTokens) };
+}
+
+/** The body's lines without line endings, including a last unterminated one. */
+async function* sseLines(res: Response): AsyncGenerator<string> {
+  const tooLong = () =>
+    new ProviderError("provider stream line too long", "unknown");
+  let pending = "";
+  const decoder = new TextDecoder();
+  for await (const c of chunks(res)) {
+    pending += decoder.decode(c, { stream: true });
+    const lines = pending.split("\n");
+    pending = lines.pop() ?? "";
+    if (pending.length > MAX_SSE_LINE) throw tooLong();
+    for (const line of lines) {
+      if (line.length > MAX_SSE_LINE) throw tooLong();
+      yield line.replace(/\r$/, "");
+    }
+  }
+  pending += decoder.decode();
+  if (pending) yield pending.replace(/\r$/, "");
 }
 
 /** Vertex AI generateContent for chat, predict for embeddings. */
@@ -118,32 +138,25 @@ export function vertexProvider(m: VertexModel): ModelProvider {
         generate(req),
         req.signal,
       );
-      let finishReason: FinishReason = "other";
+      let finishReason: FinishReason | undefined;
       let usage: Record<string, unknown> | undefined;
-      let pending = "";
-      const decoder = new TextDecoder();
-      for await (const c of chunks(res)) {
-        pending += decoder.decode(c, { stream: true });
-        const lines = pending.split("\n");
-        pending = lines.pop() ?? "";
-        if (pending.length > MAX_SSE_LINE) {
-          throw new ProviderError("provider stream line too long", "unknown");
+      for await (const line of sseLines(res)) {
+        if (!line.startsWith("data:")) continue;
+        let event: Chunk;
+        try {
+          event = JSON.parse(line.slice(5));
+        } catch {
+          throw new ProviderError("provider stream malformed", "unknown");
         }
-        for (const raw of lines) {
-          const line = raw.replace(/\r$/, "");
-          if (!line.startsWith("data:")) continue;
-          let event: Chunk;
-          try {
-            event = JSON.parse(line.slice(5));
-          } catch {
-            throw new ProviderError("provider stream malformed", "unknown");
-          }
-          const text = textOf(event);
-          if (text) yield { type: "delta", text };
-          const reason = event.candidates?.[0]?.finishReason;
-          if (reason !== undefined) finishReason = finish(reason);
-          if (event.usageMetadata) usage = event.usageMetadata;
-        }
+        const text = textOf(event);
+        if (text) yield { type: "delta", text };
+        const reason = event.candidates?.[0]?.finishReason;
+        if (reason !== undefined) finishReason = finish(reason);
+        if (event.usageMetadata) usage = event.usageMetadata;
+      }
+      // A stream cut before its final chunk may still have been billed.
+      if (finishReason === undefined) {
+        throw new ProviderError("provider stream ended early", "unknown");
       }
       yield { type: "done", finishReason, usage: usageOf(usage) };
     },
