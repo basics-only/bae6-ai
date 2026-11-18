@@ -21,6 +21,7 @@ export interface AgentModel {
     messages: AgentMessage[],
     tools: { name: string; description: string }[],
     signal: AbortSignal,
+    remainingTokens: number,
   ): Promise<ModelTurn>;
 }
 
@@ -43,7 +44,7 @@ export interface Limits {
 export interface Receipt {
   step: number;
   tool: string;
-  input: unknown;
+  input: string;
   outcome: "ok" | "invalid_input" | "not_allowed" | "denied" | "error";
   detail: string;
   truncated: boolean;
@@ -70,7 +71,7 @@ export interface AgentConfig {
   tools: Tool[];
   allow: readonly string[];
   limits: Limits;
-  approve?: (call: ToolCall) => Promise<boolean>;
+  approve?: (call: ToolCall, signal: AbortSignal) => Promise<boolean>;
 }
 
 const HARD_MAX = {
@@ -79,6 +80,8 @@ const HARD_MAX = {
   timeoutMs: 3_600_000,
   outputChars: 1_000_000,
 };
+const MAX_LABEL_CHARS = 100;
+const MAX_INPUT_CHARS = 1_000;
 
 export function validateLimits(l: Limits): void {
   const ok = (v: number, max: number) =>
@@ -107,14 +110,42 @@ function withTimeout(
   };
 }
 
-function validUsage(u: Usage | undefined): u is Usage {
-  return (
-    !!u &&
-    Number.isSafeInteger(u.inputTokens) &&
-    Number.isSafeInteger(u.outputTokens) &&
-    u.inputTokens >= 0 &&
-    u.outputTokens >= 0
+// Callees may ignore the signal; the run must still end when it fires.
+function race<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new Error("aborted"));
+  let onAbort = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new Error("aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  return Promise.race([work, aborted]).finally(() =>
+    signal.removeEventListener("abort", onAbort),
   );
+}
+
+function isCount(n: unknown): n is number {
+  return Number.isSafeInteger(n) && (n as number) >= 0;
+}
+
+function validTurn(t: any): t is ModelTurn {
+  if (!t || typeof t !== "object") return false;
+  if (!isCount(t.usage?.inputTokens) || !isCount(t.usage?.outputTokens)) {
+    return false;
+  }
+  if (t.type === "final") return typeof t.text === "string";
+  return t.type === "tool" && typeof t.call?.name === "string";
+}
+
+function cap(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max) : s;
+}
+
+function show(input: unknown): string {
+  try {
+    return cap(JSON.stringify(input) ?? "undefined", MAX_INPUT_CHARS);
+  } catch {
+    return "[unserializable]";
+  }
 }
 
 export function createAgent(config: AgentConfig) {
@@ -130,8 +161,7 @@ export function createAgent(config: AgentConfig) {
 
   return {
     async run(task: string, outer: AbortSignal): Promise<RunResult> {
-      const { limits } = config;
-      const { signal, clear } = withTimeout(outer, limits.timeoutMs);
+      const { signal, clear } = withTimeout(outer, config.limits.timeoutMs);
       try {
         return await loop(task, outer, signal);
       } finally {
@@ -158,24 +188,39 @@ export function createAgent(config: AgentConfig) {
 
     for (let step = 1; step <= limits.maxSteps; step++) {
       if (signal.aborted) return interrupted();
-      let turn: ModelTurn;
+      let turn: unknown;
       try {
-        turn = await config.model.next(messages, offered, signal);
+        turn = await race(
+          config.model.next(
+            messages,
+            offered,
+            signal,
+            limits.maxTotalTokens - tokens,
+          ),
+          signal,
+        );
       } catch {
         return signal.aborted ? interrupted() : done("model_error");
       }
-      if (!validUsage(turn.usage)) return done("model_error");
+      if (!validTurn(turn)) return done("model_error");
       tokens += turn.usage.inputTokens + turn.usage.outputTokens;
-      if (turn.type === "final") return done("final", turn.text);
+      if (turn.type === "final") {
+        return tokens > limits.maxTotalTokens
+          ? done("token_budget")
+          : done("final", turn.text);
+      }
       if (tokens >= limits.maxTotalTokens) return done("token_budget");
 
       const receipt = await execute(step, turn.call, signal);
       receipts.push(receipt);
       if (signal.aborted) return interrupted();
-      messages.push({ role: "assistant", text: `call ${turn.call.name}` });
+      messages.push({
+        role: "assistant",
+        text: `call ${receipt.tool} ${receipt.input}`,
+      });
       messages.push({
         role: "tool",
-        name: turn.call.name,
+        name: receipt.tool,
         text: receipt.detail,
         untrusted: true,
       });
@@ -189,17 +234,18 @@ export function createAgent(config: AgentConfig) {
     signal: AbortSignal,
   ): Promise<Receipt> {
     const started = Date.now();
+    const max = config.limits.maxToolOutputChars;
     const receipt = (
       outcome: Receipt["outcome"],
       detail: string,
       truncated = false,
     ): Receipt => ({
       step,
-      tool: call.name,
-      input: call.input,
+      tool: cap(call.name, MAX_LABEL_CHARS),
+      input: show(call.input),
       outcome,
-      detail,
-      truncated,
+      detail: cap(detail, max),
+      truncated: truncated || detail.length > max,
       durationMs: Date.now() - started,
     });
     const tool = byName.get(call.name);
@@ -208,14 +254,21 @@ export function createAgent(config: AgentConfig) {
     }
     let input: unknown;
     try {
-      input = tool.parse(call.input);
+      input = structuredClone(tool.parse(call.input));
     } catch (e) {
       return receipt("invalid_input", message(e));
     }
     if (tool.requiresApproval) {
       let ok = false;
       try {
-        ok = (await config.approve?.(call)) === true;
+        ok =
+          (await race(
+            config.approve?.(
+              { name: tool.name, input: structuredClone(input) },
+              signal,
+            ) ?? Promise.resolve(false),
+            signal,
+          )) === true;
       } catch {
         ok = false;
       }
@@ -223,11 +276,10 @@ export function createAgent(config: AgentConfig) {
     }
     const bounded = withTimeout(signal, config.limits.toolTimeoutMs);
     try {
-      const out = await tool.run(input, bounded.signal);
-      const max = config.limits.maxToolOutputChars;
-      return out.length > max
-        ? receipt("ok", out.slice(0, max), true)
-        : receipt("ok", out);
+      return receipt(
+        "ok",
+        await race(tool.run(input, bounded.signal), bounded.signal),
+      );
     } catch (e) {
       return receipt("error", message(e));
     } finally {
