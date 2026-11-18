@@ -253,7 +253,10 @@ export class Ai {
         if (isObject(event.error)) {
           throw httpError(502, event.error);
         }
+        // The consumer's time between pulls is not the gateway being idle.
+        clearTimeout(timer);
         yield event as unknown as ChatChunk;
+        touch();
       }
     } catch (err) {
       if (err instanceof AiError) throw err;
