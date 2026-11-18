@@ -66,6 +66,20 @@ test("rejects what it does not support instead of ignoring it", () => {
     code(() => parseChat(chat({ messages: [{ role: "tool", content: "x" }] }))),
     "unsupported_parameter",
   );
+  for (const p of [
+    { type: "text", text: "x", cache_control: {} },
+    {
+      type: "image_url",
+      image_url: { url: "data:image/png;base64,aGk=", detail: "high" },
+    },
+  ]) {
+    assert.equal(
+      code(() =>
+        parseChat(chat({ messages: [{ role: "user", content: [p] }] })),
+      ),
+      "unsupported_parameter",
+    );
+  }
   assert.equal(
     code(() =>
       parseChat(

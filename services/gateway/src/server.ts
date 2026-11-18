@@ -113,6 +113,12 @@ export function createGateway(deps: GatewayDeps) {
     }
   }
 
+  const metering = <T>(read: Promise<T>) =>
+    read.catch((err: Error) => {
+      log({ msg: "ledger_unavailable", error: err.name });
+      throw new HttpError(503, "unavailable", "Metering is unavailable.", 1);
+    });
+
   function resolve(id: string, who: Who, op: Operation): GatewayModel {
     const m = models.get(id);
     if (
@@ -233,6 +239,8 @@ export function createGateway(deps: GatewayDeps) {
       const e = providerHttpError(err, timeout.aborted);
       status = e.status;
       body = envelope(e, requestId);
+      if (e.retryAfterSeconds !== undefined)
+        res.setHeader("retry-after", String(e.retryAfterSeconds));
     }
     await finalize(ledgerId, outcome);
     if (key) {
@@ -515,7 +523,7 @@ export function createGateway(deps: GatewayDeps) {
     }
     if (endpoint === "GET /v1/budgets") {
       requireScope(who, "ai:usage:read");
-      const b = await ledger.budget(who.organizationId);
+      const b = await metering(ledger.budget(who.organizationId));
       return send(res, 200, {
         period: b.period,
         limit: deps.budgets[who.organizationId] ?? "0",
@@ -542,7 +550,7 @@ export function createGateway(deps: GatewayDeps) {
       return send(res, 200, {
         from: from.toISOString(),
         to: to.toISOString(),
-        data: await ledger.usage(who, from, to),
+        data: await metering(ledger.usage(who, from, to)),
       });
     }
 

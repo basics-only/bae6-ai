@@ -32,22 +32,23 @@ const ledger = {
   release: async () => {
     keys.push("release");
   },
-  budget: async () => ({
-    period: "2026-11",
-    limit: "10",
-    spent: "1.5",
-    reserved: "0",
-  }),
-  usage: async () => [
-    {
-      model: "m",
-      outcome: "measured",
-      requests: 2,
-      inputTokens: 6,
-      outputTokens: 4,
-      cost: "0.0001",
-    },
-  ],
+  budget: async () => {
+    if (ledgerDown) throw new Error("db down");
+    return { period: "2026-11", limit: "10", spent: "1.5", reserved: "0" };
+  },
+  usage: async () => {
+    if (ledgerDown) throw new Error("db down");
+    return [
+      {
+        model: "m",
+        outcome: "measured",
+        requests: 2,
+        inputTokens: 6,
+        outputTokens: 4,
+        cost: "0.0001",
+      },
+    ];
+  },
 } as unknown as Ledger;
 
 const config: ModelConfig = {
@@ -185,6 +186,14 @@ test("a provider error answer is not billed; a lost answer is charged as uncerta
   assert.deepEqual(finalized, [{ kind: "failed" }, { kind: "uncertain" }]);
 });
 
+test("a provider throttle tells the client when to retry", async () => {
+  fail = new ProviderError("x", "no", 429);
+  const res = await post("acme", hi);
+  fail = undefined;
+  assert.equal(res.status, 429);
+  assert.equal(res.headers.get("retry-after"), "2");
+});
+
 test("streams OpenAI chunks with usage and finalizes once", async () => {
   finalized.length = 0;
   const res = await post("acme", {
@@ -302,5 +311,18 @@ test("responses conform to the contract", async () => {
     const body = await res.json();
     assert.deepEqual([res.status, body.code], [status, code]);
     conforms("ErrorEnvelope", body);
+  }
+});
+
+test("budget and usage reads fail closed with 503 when metering is down", async () => {
+  ledgerDown = true;
+  const res = [
+    await call("GET", "/v1/budgets", "reader"),
+    await call("GET", "/v1/usage", "reader"),
+  ];
+  ledgerDown = false;
+  for (const r of res) {
+    assert.equal(r.status, 503);
+    assert.equal(((await r.json()) as { code: string }).code, "unavailable");
   }
 });
