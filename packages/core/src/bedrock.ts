@@ -165,7 +165,16 @@ export function bedrockProvider(m: BedrockModel): ModelProvider {
       let inputTokens = 0;
       // Titan embeds one text per call; the gateway bounds how many inputs there are.
       for (const inputText of input) {
-        const body = await json(await send("invoke", { inputText }, signal));
+        let body: Record<string, unknown>;
+        try {
+          body = await json(await send("invoke", { inputText }, signal));
+        } catch (err) {
+          // Earlier inputs were already billed, so a later failure cannot say "not billed".
+          if (vectors.length && err instanceof ProviderError) {
+            throw new ProviderError(err.message, "unknown", err.status);
+          }
+          throw err;
+        }
         const { embedding } = body;
         if (
           !Array.isArray(embedding) ||
