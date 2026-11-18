@@ -38,9 +38,12 @@ export interface ChatInput {
 function part(p: unknown, images: { n: number }): ContentPart {
   if (!isObject(p)) throw invalid("Each content part must be an object.");
   if (p.type === "text" && typeof p.text === "string") {
+    onlyKeys(p, ["type", "text"]);
     return { type: "text", text: p.text };
   }
   if (p.type === "image_url" && isObject(p.image_url)) {
+    onlyKeys(p, ["type", "image_url"]);
+    onlyKeys(p.image_url, ["url"]);
     // Only inline images: fetching caller-named URLs would let callers reach our network.
     const m = DATA_URL.exec(String(p.image_url.url));
     if (!m) throw invalid("image_url.url must be a base64 data: URL.");
