@@ -10,6 +10,7 @@ import {
   type ModelProvider,
   type Operation,
   ProviderError,
+  type StreamEvent,
   UnsupportedOperation,
   type Usage,
 } from "@bae6/ai-core";
@@ -199,13 +200,14 @@ export function createGateway(deps: GatewayDeps) {
     } catch (err) {
       if (err instanceof HttpError) throw err;
       log({ msg: "ledger_unavailable", error: (err as Error).name });
+      // Nothing reached a provider: free the key so the client's retry can proceed.
+      if (key) await ledger.release(caller, key).catch(() => {});
       throw new HttpError(503, "unavailable", "Metering is unavailable.", 1);
     }
   }
 
   /** Runs one metered, non-streaming provider call and answers (and records it for replay). */
   async function metered(
-    req: IncomingMessage,
     res: ServerResponse,
     requestId: string,
     who: Who,
@@ -214,28 +216,35 @@ export function createGateway(deps: GatewayDeps) {
     call: (signal: AbortSignal) => Promise<{ body: unknown; usage: Usage }>,
   ) {
     const closed = new AbortController();
-    req.once("close", () => {
+    // `req` closes once its body is read; only `res` closes on a client disconnect.
+    res.once("close", () => {
       if (!res.writableEnded) closed.abort();
     });
     const timeout = AbortSignal.timeout(deps.timeoutMs);
     let status = 200;
     let body: unknown;
+    let outcome: Outcome;
     try {
       const r = await call(AbortSignal.any([timeout, closed.signal]));
-      await finalize(ledgerId, { kind: "measured", usage: r.usage });
+      outcome = { kind: "measured", usage: r.usage };
       body = r.body;
     } catch (err) {
-      await finalize(ledgerId, outcomeOf(err));
+      outcome = outcomeOf(err);
       const e = providerHttpError(err, timeout.aborted);
       status = e.status;
       body = envelope(e, requestId);
     }
+    await finalize(ledgerId, outcome);
     if (key) {
-      await ledger
-        .complete(callerOf(who), key, status, body)
-        .catch((err) =>
-          log({ msg: "idempotency_store_failed", error: (err as Error).name }),
-        );
+      const caller = callerOf(who);
+      // A call the provider did not bill is safe to retry, so it is not replayed.
+      // A failed store leaves the key in progress: a 409 beats a second billed call.
+      await (outcome.kind === "failed"
+        ? ledger.release(caller, key)
+        : ledger.complete(caller, key, status, body)
+      ).catch((err) =>
+        log({ msg: "idempotency_store_failed", error: (err as Error).name }),
+      );
     }
     send(res, status, body);
   }
@@ -309,27 +318,19 @@ export function createGateway(deps: GatewayDeps) {
     });
 
     if (!input.stream) {
-      return metered(
-        req,
-        res,
-        requestId,
-        who,
-        ledgerId,
-        key,
-        async (signal) => {
-          const r = await model.provider.chat(chatRequest(signal));
-          return {
-            body: completion(
-              ledgerId,
-              config.id,
-              r.text,
-              r.finishReason,
-              r.usage,
-            ),
-            usage: r.usage,
-          };
-        },
-      );
+      return metered(res, requestId, who, ledgerId, key, async (signal) => {
+        const r = await model.provider.chat(chatRequest(signal));
+        return {
+          body: completion(
+            ledgerId,
+            config.id,
+            r.text,
+            r.finishReason,
+            r.usage,
+          ),
+          usage: r.usage,
+        };
+      });
     }
 
     const closed = new AbortController();
@@ -337,11 +338,11 @@ export function createGateway(deps: GatewayDeps) {
       if (!res.writableEnded) closed.abort();
     });
     const timeout = AbortSignal.timeout(deps.timeoutMs);
-    const events = model.provider
-      .stream(chatRequest(AbortSignal.any([timeout, closed.signal])))
-      [Symbol.asyncIterator]();
-    let next: IteratorResult<unknown>;
+    const stop = AbortSignal.any([timeout, closed.signal]);
+    let events: AsyncIterator<StreamEvent>;
+    let next: IteratorResult<StreamEvent>;
     try {
+      events = model.provider.stream(chatRequest(stop))[Symbol.asyncIterator]();
       next = await events.next();
     } catch (err) {
       await finalize(ledgerId, outcomeOf(err));
@@ -359,7 +360,7 @@ export function createGateway(deps: GatewayDeps) {
           `data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`,
         )
       ) {
-        await once(res, "drain", { signal: closed.signal });
+        await once(res, "drain", { signal: stop });
       }
     };
     let outcome: Outcome = { kind: "uncertain" };
@@ -368,9 +369,7 @@ export function createGateway(deps: GatewayDeps) {
         chunk(ledgerId, config.id, { role: "assistant", content: "" }),
       );
       while (!next.done) {
-        const e = next.value as Awaited<
-          ReturnType<typeof events.next>
-        >["value"];
+        const e = next.value;
         if (e.type === "delta") {
           await write(chunk(ledgerId, config.id, { content: e.text }));
         } else {
@@ -392,6 +391,8 @@ export function createGateway(deps: GatewayDeps) {
     } finally {
       await finalize(ledgerId, outcome);
       res.end();
+      // A client that stopped reading would otherwise hold the socket indefinitely.
+      if (timeout.aborted && res.writableNeedDrain) res.destroy();
     }
   }
 
@@ -422,7 +423,7 @@ export function createGateway(deps: GatewayDeps) {
       0,
     );
     if (ledgerId === null) return;
-    return metered(req, res, requestId, who, ledgerId, key, async (signal) => {
+    return metered(res, requestId, who, ledgerId, key, async (signal) => {
       const r = await model.provider.embed(input.input, signal);
       const usage = { inputTokens: r.usage.inputTokens, outputTokens: 0 };
       return {

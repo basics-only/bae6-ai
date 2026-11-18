@@ -21,6 +21,7 @@ export type Claim =
   | { state: "mismatch" };
 
 const MAX_RECONCILE_BATCH = 100;
+const RECONCILE_LOCK_ID = 7_202_002;
 
 export const periodOf = (now = new Date()) => now.toISOString().slice(0, 7);
 
@@ -139,13 +140,16 @@ export function createLedger(
 
     /**
      * Finalizes reservations whose lease expired (their replica crashed or hung) as uncertain
-     * at the estimate. Safe on every replica: claimed rows are skipped by the others.
+     * at the estimate. One replica at a time: concurrent batches would lock budget rows in
+     * different orders and deadlock.
      */
     async reconcile(): Promise<number> {
       const result = await pool.query<{ n: number }>(
-        `WITH r AS (
+        `WITH lock AS (SELECT pg_try_advisory_xact_lock(${RECONCILE_LOCK_ID}) AS held),
+         r AS (
            DELETE FROM reservations WHERE request_id IN (
-             SELECT request_id FROM reservations WHERE lease_expires < now()
+             SELECT request_id FROM reservations
+             WHERE lease_expires < now() AND (SELECT held FROM lock)
              ORDER BY lease_expires LIMIT $1 FOR UPDATE SKIP LOCKED)
            RETURNING *),
          e AS (

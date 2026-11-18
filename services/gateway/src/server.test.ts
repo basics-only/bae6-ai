@@ -8,17 +8,26 @@ import type { Ledger, Outcome } from "./ledger.js";
 import { createGateway } from "./server.js";
 
 const finalized: Outcome[] = [];
+const keys: string[] = [];
 let fail: ProviderError | undefined;
+let ledgerDown = false;
 
 const ledger = {
-  reserve: async () => "0.01",
+  reserve: async () => {
+    if (ledgerDown) throw new Error("db down");
+    return "0.01";
+  },
   finalize: async (_: string, o: Outcome) => {
     finalized.push(o);
     return true;
   },
   claim: async () => ({ state: "new" }),
-  complete: async () => {},
-  release: async () => {},
+  complete: async (_: unknown, _k: string, status: number) => {
+    keys.push(`complete ${status}`);
+  },
+  release: async () => {
+    keys.push("release");
+  },
 } as unknown as Ledger;
 
 const config: ModelConfig = {
@@ -100,12 +109,13 @@ before(async () => {
 });
 after(() => server.close());
 
-const post = (token: string | undefined, body: unknown) =>
+const post = (token: string | undefined, body: unknown, key?: string) =>
   fetch(`${base}/v1/chat/completions`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(key ? { "idempotency-key": key } : {}),
     },
     body: JSON.stringify(body),
   });
@@ -166,4 +176,17 @@ test("rejects unsupported parameters before any reservation", async () => {
     "unsupported_parameter",
   );
   assert.deepEqual(finalized, []);
+});
+
+test("an idempotency key is freed when nothing was billed, and kept when it may have been", async () => {
+  keys.length = 0;
+  fail = new ProviderError("x", "no", 429);
+  assert.equal((await post("acme", hi, "key-00001")).status, 429);
+  fail = new ProviderError("x", "unknown");
+  assert.equal((await post("acme", hi, "key-00002")).status, 502);
+  fail = undefined;
+  ledgerDown = true;
+  assert.equal((await post("acme", hi, "key-00003")).status, 503);
+  ledgerDown = false;
+  assert.deepEqual(keys, ["release", "complete 502", "release"]);
 });

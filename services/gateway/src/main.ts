@@ -131,7 +131,7 @@ process.once("SIGTERM", () => {
       pool.end().finally(() => process.exit(0));
     });
     server.closeIdleConnections();
-    // Hard stop if a stream outlives the grace period; its lease is reconciled.
-    setTimeout(() => process.exit(1), 10_000).unref();
+    // In-flight calls end within timeoutMs; set terminationGracePeriodSeconds above this.
+    setTimeout(() => process.exit(1), timeoutMs + 5000).unref();
   }, shutdownDelayMs).unref();
 });

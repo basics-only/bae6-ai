@@ -164,3 +164,21 @@ test(
     );
   },
 );
+
+test(
+  "concurrent reconciles across organizations settle each lease once",
+  { skip },
+  async () => {
+    const orgs = [caller(), caller(), caller()];
+    for (const c of orgs) {
+      for (let i = 0; i < 3; i++)
+        assert.notEqual(await reserve(c, -1000), null);
+    }
+    await Promise.all(Array.from({ length: 6 }, () => ledger.reconcile()));
+    while ((await ledger.reconcile()) > 0);
+    for (const c of orgs) {
+      const b = await ledger.budget(c.organizationId);
+      assert.deepEqual([Number(b.spent), Number(b.reserved)], [3, 0]);
+    }
+  },
+);

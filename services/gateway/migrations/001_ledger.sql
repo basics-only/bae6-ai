@@ -19,6 +19,12 @@ CREATE TABLE prices (
 );
 CREATE TRIGGER prices_immutable BEFORE UPDATE OR DELETE ON prices
   FOR EACH ROW EXECUTE FUNCTION reject_change();
+CREATE TRIGGER prices_no_truncate BEFORE TRUNCATE ON prices
+  FOR EACH STATEMENT EXECUTE FUNCTION reject_change();
+CREATE TRIGGER price_books_immutable BEFORE UPDATE OR DELETE ON price_books
+  FOR EACH ROW EXECUTE FUNCTION reject_change();
+CREATE TRIGGER price_books_no_truncate BEFORE TRUNCATE ON price_books
+  FOR EACH STATEMENT EXECUTE FUNCTION reject_change();
 
 CREATE TABLE budgets (
   organization_id text NOT NULL CHECK (organization_id ~ '^[a-z0-9][a-z0-9-]{0,62}$'),
@@ -63,6 +69,8 @@ CREATE TABLE usage_events (
 CREATE INDEX usage_events_tenant ON usage_events (organization_id, application_id, time);
 CREATE TRIGGER usage_events_append_only BEFORE UPDATE OR DELETE ON usage_events
   FOR EACH ROW EXECUTE FUNCTION reject_change();
+CREATE TRIGGER usage_events_no_truncate BEFORE TRUNCATE ON usage_events
+  FOR EACH STATEMENT EXECUTE FUNCTION reject_change();
 
 CREATE TABLE idempotency_keys (
   organization_id text NOT NULL,
