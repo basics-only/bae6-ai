@@ -185,6 +185,14 @@ test("a provider error answer is not billed; a lost answer is charged as uncerta
   assert.deepEqual(finalized, [{ kind: "failed" }, { kind: "uncertain" }]);
 });
 
+test("a provider throttle tells the client when to retry", async () => {
+  fail = new ProviderError("x", "no", 429);
+  const res = await post("acme", hi);
+  fail = undefined;
+  assert.equal(res.status, 429);
+  assert.equal(res.headers.get("retry-after"), "2");
+});
+
 test("streams OpenAI chunks with usage and finalizes once", async () => {
   finalized.length = 0;
   const res = await post("acme", {

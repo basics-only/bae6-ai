@@ -233,6 +233,8 @@ export function createGateway(deps: GatewayDeps) {
       const e = providerHttpError(err, timeout.aborted);
       status = e.status;
       body = envelope(e, requestId);
+      if (e.retryAfterSeconds !== undefined)
+        res.setHeader("retry-after", String(e.retryAfterSeconds));
     }
     await finalize(ledgerId, outcome);
     if (key) {
