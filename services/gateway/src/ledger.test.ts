@@ -1,0 +1,184 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { after, before, test } from "node:test";
+import pg from "pg";
+import { createLedger, type Ledger } from "./ledger.js";
+import { migrate } from "./migrate.js";
+
+const url = process.env.BAE6_DATABASE_URL;
+const skip = url ? false : "BAE6_DATABASE_URL not set";
+let pool: pg.Pool;
+let ledger: Ledger;
+
+before(async () => {
+  if (!url) return;
+  pool = new pg.Pool({ connectionString: url, max: 20 });
+  const c = await pool.connect();
+  try {
+    await migrate(c);
+  } finally {
+    c.release();
+  }
+  ledger = createLedger(pool, { priceBookVersion: "test-v1" });
+  // 1 per Mtok in, 2 per Mtok out: 1M in + 0 out costs exactly 1.
+  await ledger.publishPrices({ m: { inputPerMTok: "1", outputPerMTok: "2" } });
+});
+
+after(() => pool?.end());
+
+const caller = () => ({
+  organizationId: `org-${randomUUID().slice(0, 8)}`,
+  applicationId: "app",
+  subjectId: "svc",
+});
+
+const reserve = (c: ReturnType<typeof caller>, leaseMs = 60_000) =>
+  ledger.reserve({
+    requestId: `led_${randomUUID()}`,
+    caller: c,
+    limit: "5",
+    provider: "bedrock",
+    modelId: "m",
+    inputTokens: 1_000_000,
+    maxOutputTokens: 0,
+    leaseMs,
+  });
+
+test("concurrent reserves never exceed the limit", { skip }, async () => {
+  const c = caller();
+  const held = await Promise.all(Array.from({ length: 20 }, () => reserve(c)));
+  assert.equal(held.filter((e) => e !== null).length, 5);
+  const b = await ledger.budget(c.organizationId);
+  assert.equal(Number(b.reserved), 5);
+});
+
+test(
+  "finalize is applied once and uncertain is charged at the estimate",
+  { skip },
+  async () => {
+    const c = caller();
+    const id = `led_${randomUUID()}`;
+    const estimate = await ledger.reserve({
+      requestId: id,
+      caller: c,
+      limit: "5",
+      provider: "bedrock",
+      modelId: "m",
+      inputTokens: 1_000_000,
+      maxOutputTokens: 500_000,
+      leaseMs: 60_000,
+    });
+    assert.equal(Number(estimate), 2);
+    assert.equal(await ledger.finalize(id, { kind: "uncertain" }), true);
+    assert.equal(
+      await ledger.finalize(id, {
+        kind: "measured",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+      false,
+    );
+    const b = await ledger.budget(c.organizationId);
+    assert.deepEqual([Number(b.spent), Number(b.reserved)], [2, 0]);
+  },
+);
+
+test(
+  "measured cost replaces the estimate; failed costs nothing",
+  { skip },
+  async () => {
+    const c = caller();
+    const ids = [`led_${randomUUID()}`, `led_${randomUUID()}`];
+    for (const id of ids) {
+      await ledger.reserve({
+        requestId: id,
+        caller: c,
+        limit: "5",
+        provider: "bedrock",
+        modelId: "m",
+        inputTokens: 1_000_000,
+        maxOutputTokens: 0,
+        leaseMs: 60_000,
+      });
+    }
+    await ledger.finalize(ids[0] as string, {
+      kind: "measured",
+      usage: { inputTokens: 500_000, outputTokens: 0 },
+    });
+    await ledger.finalize(ids[1] as string, { kind: "failed" });
+    const b = await ledger.budget(c.organizationId);
+    assert.deepEqual([Number(b.spent), Number(b.reserved)], [0.5, 0]);
+  },
+);
+
+test(
+  "the reconciler charges expired leases as uncertain",
+  { skip },
+  async () => {
+    const c = caller();
+    assert.notEqual(await reserve(c, -1000), null);
+    assert.ok((await ledger.reconcile()) >= 1);
+    const b = await ledger.budget(c.organizationId);
+    assert.deepEqual([Number(b.spent), Number(b.reserved)], [1, 0]);
+  },
+);
+
+test(
+  "an idempotency key replays, and refuses a different request",
+  { skip },
+  async () => {
+    const c = caller();
+    const rid = () => `led_${randomUUID()}`;
+    assert.equal(
+      (await ledger.claim(c, "key-00001", "h1", rid())).state,
+      "new",
+    );
+    assert.equal(
+      (await ledger.claim(c, "key-00001", "h1", rid())).state,
+      "in_progress",
+    );
+    await ledger.complete(c, "key-00001", 200, { ok: true });
+    assert.deepEqual(await ledger.claim(c, "key-00001", "h1", rid()), {
+      state: "replay",
+      status: 200,
+      body: { ok: true },
+    });
+    assert.equal(
+      (await ledger.claim(c, "key-00001", "h2", rid())).state,
+      "mismatch",
+    );
+    // Another tenant's identical key is independent.
+    assert.equal(
+      (await ledger.claim(caller(), "key-00001", "h1", rid())).state,
+      "new",
+    );
+  },
+);
+
+test(
+  "a changed price under the same version is refused",
+  { skip },
+  async () => {
+    await assert.rejects(
+      ledger.publishPrices({ m: { inputPerMTok: "9", outputPerMTok: "2" } }),
+      /publish a new version/,
+    );
+  },
+);
+
+test(
+  "concurrent reconciles across organizations settle each lease once",
+  { skip },
+  async () => {
+    const orgs = [caller(), caller(), caller()];
+    for (const c of orgs) {
+      for (let i = 0; i < 3; i++)
+        assert.notEqual(await reserve(c, -1000), null);
+    }
+    await Promise.all(Array.from({ length: 6 }, () => ledger.reconcile()));
+    while ((await ledger.reconcile()) > 0);
+    for (const c of orgs) {
+      const b = await ledger.budget(c.organizationId);
+      assert.deepEqual([Number(b.spent), Number(b.reserved)], [3, 0]);
+    }
+  },
+);
