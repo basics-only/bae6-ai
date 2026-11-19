@@ -17,6 +17,7 @@ env:
   BAE6_SHUTDOWN_DELAY_MS: "10000"
   BAE6_PROVIDER_TIMEOUT_MS: "60000"
   BAE6_MAX_INFLIGHT: "64"
+  BAE6_MAX_INFLIGHT_PER_ORG: "32"
   # pool max x maxReplicas must fit this service's share of Postgres connections.
   BAE6_DB_POOL_MAX: "10"
   BAE6_AI_ISSUERS: >-
