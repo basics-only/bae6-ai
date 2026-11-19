@@ -36,9 +36,19 @@ export async function readBody(
 ): Promise<{ json: unknown; sha256: string }> {
   const chunks: Buffer[] = [];
   let size = 0;
-  const timer = setTimeout(() => req.destroy(), deadlineMs);
+  const idle = () =>
+    setTimeout(
+      () =>
+        req.destroy(
+          new HttpError(408, "request_timeout", "Body stopped arriving."),
+        ),
+      deadlineMs,
+    );
+  let timer = idle();
   try {
     for await (const chunk of req) {
+      clearTimeout(timer);
+      timer = idle();
       size += chunk.length;
       if (size > maxBytes) {
         throw new HttpError(
