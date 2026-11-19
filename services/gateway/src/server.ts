@@ -39,6 +39,8 @@ export interface GatewayDeps {
   budgets: Record<string, string>;
   timeoutMs: number;
   maxInflight: number;
+  /** In-flight invocations one organization may hold, so it cannot starve the others. */
+  maxInflightPerOrg: number;
   ready: () => Promise<boolean>;
   log?: (event: Record<string, unknown>) => void;
 }
@@ -103,6 +105,7 @@ export function createGateway(deps: GatewayDeps) {
   const { ledger, models, log = () => {} } = deps;
   let draining = false;
   let inflight = 0;
+  const inflightByOrg = new Map<string, number>();
 
   async function finalize(id: string, outcome: Outcome) {
     try {
@@ -581,11 +584,25 @@ export function createGateway(deps: GatewayDeps) {
         1,
       );
     }
+    const org = who.organizationId;
+    const orgInflight = inflightByOrg.get(org) ?? 0;
+    if (orgInflight >= deps.maxInflightPerOrg) {
+      throw new HttpError(
+        429,
+        "rate_limited",
+        "This organization is at its concurrency limit.",
+        1,
+      );
+    }
     inflight++;
+    inflightByOrg.set(org, orgInflight + 1);
     try {
       await invoke(req, res, requestId, who, keyHeader);
     } finally {
       inflight--;
+      const left = (inflightByOrg.get(org) ?? 1) - 1;
+      if (left === 0) inflightByOrg.delete(org);
+      else inflightByOrg.set(org, left);
     }
   }
 
