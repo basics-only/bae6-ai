@@ -44,6 +44,26 @@ if (!rawConfig) {
 }
 const config = parseConfig(JSON.parse(rawConfig));
 
+// Signed requests carry real AWS credentials, so only AWS hosts are allowed outside development.
+const allowCustomEndpoints =
+  env.BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS === "true";
+if (allowCustomEndpoints && env.NODE_ENV === "production") {
+  throw new Error(
+    "BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS is for development only",
+  );
+}
+for (const m of config.models) {
+  if (
+    m.endpoint !== undefined &&
+    !new URL(m.endpoint).hostname.endsWith(".amazonaws.com") &&
+    !allowCustomEndpoints
+  ) {
+    throw new Error(
+      `model ${m.id}: endpoint is not an AWS host; needs BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS`,
+    );
+  }
+}
+
 const port = int("PORT", 8080, 1, 65535);
 const timeoutMs = int("BAE6_PROVIDER_TIMEOUT_MS", 60_000, 1000, 300_000);
 const maxInflight = int("BAE6_MAX_INFLIGHT", 64, 1, 10_000);
@@ -73,6 +93,7 @@ const models = new Map<string, GatewayModel>(
             modelId: m.providerModel,
             region: m.region,
             credentials: aws,
+            ...(m.endpoint === undefined ? {} : { endpoint: m.endpoint }),
           })
         : vertexProvider({
             descriptor: descriptor(m),
