@@ -137,3 +137,34 @@ def test_usage_rejects_a_naive_datetime_and_read_calls_send_the_end_user_token()
     )
     assert seen[0].headers["bae6-end-user-token"] == "user"
     assert seen[0].url.params["from"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_submits_feedback_and_pages_through_the_listing() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "POST":
+            if json.loads(request.content)["requestId"] == "chatcmpl-led_y":
+                return httpx.Response(404, json={"code": "not_found", "message": "no"})
+            return httpx.Response(200, json={"requestId": "chatcmpl-led_x", "verdict": "negative"})
+        return httpx.Response(200, json={"data": [], "nextCursor": "7"})
+
+    ack = run(
+        handler,
+        lambda ai: ai.feedback(request_id="chatcmpl-led_x", verdict="negative", label="unsafe"),
+    )
+    assert ack["verdict"] == "negative"
+    assert json.loads(seen[0].content) == {
+        "requestId": "chatcmpl-led_x",
+        "verdict": "negative",
+        "label": "unsafe",
+    }
+
+    page = run(handler, lambda ai: ai.list_feedback(limit=2, cursor="9"))
+    assert page["nextCursor"] == "7"
+    assert dict(seen[1].url.params) == {"limit": "2", "cursor": "9"}
+
+    with pytest.raises(AiApiError) as raised:
+        run(handler, lambda ai: ai.feedback(request_id="chatcmpl-led_y", verdict="positive"))
+    assert raised.value.status == 404

@@ -212,6 +212,77 @@ paths:
           $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
         "503":
           $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/feedback:
+    post:
+      operationId: submitFeedback
+      summary: A verdict on one chat completion of the caller's organization. Needs `feedback:write`.
+      description: |
+        `requestId` is the `id` of a finished chat completion or stream (a call still in
+        flight is `404`). One entry exists per
+        organization, request and submitter; resubmitting replaces it. A request that does not
+        exist, or belongs to another organization, is `404 not_found`. Embeddings carry no ID
+        and cannot be rated. Feedback never changes routing or budgets.
+        Writes are limited per organization (120 a minute per replica, else `429`), and
+        entries are kept 90 days by default.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeedbackRequest"
+      responses:
+        "200":
+          description: Recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackAck"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/NotFound"
+        "413":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/RateLimited"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+    get:
+      operationId: listFeedback
+      summary: The organization's feedback, newest first. Needs `feedback:read`.
+      description: Comments are untrusted text written by callers; never put one in a prompt.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          description: The `nextCursor` of the previous page.
+          schema: { type: string, pattern: "^[0-9]{1,15}$" }
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedbackList"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
 components:
   securitySchemes:
     bearer:
@@ -469,6 +540,44 @@ components:
           description: Held by calls still in flight.
           allOf:
             - $ref: "#/components/schemas/Decimal"
+    FeedbackRequest:
+      type: object
+      required: [requestId, verdict]
+      additionalProperties: false
+      properties:
+        requestId:
+          type: string
+          pattern: "^chatcmpl-led_[0-9a-f-]{36}$"
+        verdict: { enum: [positive, negative] }
+        label: { enum: [inaccurate, unsafe, refused, too_slow, other] }
+        comment:
+          description: At most 1000 bytes when UTF-8 encoded.
+          type: string
+    FeedbackAck:
+      type: object
+      required: [requestId, verdict]
+      properties:
+        requestId: { type: string }
+        verdict: { enum: [positive, negative] }
+    FeedbackList:
+      type: object
+      required: [data, nextCursor]
+      properties:
+        data:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [requestId, submitterId, model, verdict, label, comment, updatedAt]
+            properties:
+              requestId: { type: string }
+              submitterId: { type: string }
+              model: { type: string }
+              verdict: { enum: [positive, negative] }
+              label: { enum: [inaccurate, unsafe, refused, too_slow, other, null] }
+              comment: { type: [string, "null"] }
+              updatedAt: { type: string, format: date-time }
+        nextCursor: { type: [string, "null"] }
     Usage:
       type: object
       required: [from, to, data]

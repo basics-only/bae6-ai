@@ -13,9 +13,11 @@ import {
 } from "./index.js";
 
 let seen: IncomingHttpHeaders = {};
+let seenUrl = "";
 let reply: (res: import("node:http").ServerResponse) => void;
 const server = createServer((req, res) => {
   seen = req.headers;
+  seenUrl = `${req.method} ${req.url}`;
   req.resume();
   req.on("end", () => reply(res));
 });
@@ -175,4 +177,27 @@ test("a slow consumer does not trip the stream timeout", async () => {
     await new Promise((r) => setTimeout(r, 250));
   }
   assert.equal(n, 2);
+});
+
+test("submits feedback and pages through the listing", async () => {
+  reply = json(200, { requestId: "chatcmpl-led_x", verdict: "negative" });
+  const ack = await ai.feedback({
+    requestId: "chatcmpl-led_x",
+    verdict: "negative",
+    label: "unsafe",
+  });
+  assert.equal(seenUrl, "POST /v1/feedback");
+  assert.equal(ack.verdict, "negative");
+
+  reply = json(200, { data: [], nextCursor: "7" });
+  const page = await ai.listFeedback({ limit: 2, cursor: "9" });
+  assert.equal(seenUrl, "GET /v1/feedback?limit=2&cursor=9");
+  assert.equal(page.nextCursor, "7");
+
+  reply = json(404, { code: "not_found", message: "no", requestId: "r" });
+  const err = await ai
+    .feedback({ requestId: "chatcmpl-led_y", verdict: "positive" })
+    .catch((e: unknown) => e);
+  assert.ok(err instanceof AiApiError);
+  assert.equal(err.status, 404);
 });

@@ -7,6 +7,7 @@ import { type ModelProvider, ProviderError } from "@bae6/ai-core";
 import AjvModule from "ajv/dist/2020.js";
 import { parse } from "yaml";
 import type { ModelConfig } from "./config.js";
+import type { Feedback } from "./feedback.js";
 import type { Identity } from "./identity.js";
 import type { Ledger, Outcome } from "./ledger.js";
 import { createGateway } from "./server.js";
@@ -53,6 +54,35 @@ const ledger = {
     ];
   },
 } as unknown as Ledger;
+
+const ratable = new Map<string, string>();
+const rated: unknown[] = [];
+let feedbackDown = false;
+const feedback = {
+  submit: async (f: { requestId: string; organizationId: string }) => {
+    if (feedbackDown) throw new Error("db down");
+    if (ratable.get(f.requestId) !== f.organizationId) return false;
+    rated.push(f);
+    return true;
+  },
+  list: async () => {
+    if (feedbackDown) throw new Error("db down");
+    return {
+      data: [
+        {
+          requestId: "chatcmpl-led_00000000-0000-0000-0000-000000000000",
+          submitterId: "svc",
+          model: "m",
+          verdict: "negative",
+          label: null,
+          comment: "wrong",
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+      nextCursor: null,
+    };
+  },
+} as unknown as Feedback;
 
 const config: ModelConfig = {
   id: "m",
@@ -116,6 +146,34 @@ const identities: Record<string, Identity> = {
     applicationId: "crm",
     scopes: ["ai:invoke", "ai:usage:read"],
   },
+  rater: {
+    subjectId: "svc",
+    subjectType: "workload",
+    organizationId: "acme",
+    applicationId: "crm",
+    scopes: ["feedback:write"],
+  },
+  rater2: {
+    subjectId: "svc",
+    subjectType: "workload",
+    organizationId: "globex",
+    applicationId: "crm",
+    scopes: ["feedback:write"],
+  },
+  spammer: {
+    subjectId: "svc",
+    subjectType: "workload",
+    organizationId: "umbrella",
+    applicationId: "crm",
+    scopes: ["feedback:write"],
+  },
+  auditor: {
+    subjectId: "svc",
+    subjectType: "workload",
+    organizationId: "acme",
+    applicationId: "crm",
+    scopes: ["feedback:read"],
+  },
   nobudget: {
     subjectId: "svc",
     subjectType: "workload",
@@ -128,6 +186,7 @@ const identities: Record<string, Identity> = {
 const server = createGateway({
   verify: async (t) => (t ? (identities[t] ?? null) : null),
   ledger,
+  feedback,
   models: new Map([
     ["m", { config, provider }],
     [
@@ -276,7 +335,7 @@ test("every documented route is served", async () => {
         ? [["GET", path]]
         : Object.keys(item).map((m) => [m.toUpperCase(), path]),
   );
-  assert.equal(routes.length, 7);
+  assert.equal(routes.length, 9);
   for (const [method, path] of routes) {
     const body = method === "POST" ? {} : undefined;
     const res = await call(method as string, path as string, "noscope", body);
@@ -352,4 +411,93 @@ test("one organization at its concurrency limit is refused while others are serv
     [200, 200],
   );
   assert.equal((await post("acme", open)).status, 200);
+});
+
+const ratedId = `chatcmpl-led_${"0".repeat(8)}-0000-0000-0000-${"1".repeat(12)}`;
+const rate = (token: string, body: unknown) =>
+  call("POST", "/v1/feedback", token, body);
+
+test("feedback needs its own scopes", async () => {
+  const v = { requestId: ratedId, verdict: "positive" };
+  assert.equal((await rate("noscope", v)).status, 403);
+  assert.equal((await rate("reader", v)).status, 403);
+  assert.equal((await rate("auditor", v)).status, 403);
+  assert.equal((await call("GET", "/v1/feedback", "rater")).status, 403);
+});
+
+test("feedback on another organization's request is the same 404 as an unknown one", async () => {
+  ratable.set("led_00000000-0000-0000-0000-111111111111", "acme");
+  rated.length = 0;
+  const body = { requestId: ratedId, verdict: "negative", label: "unsafe" };
+  const own = await rate("rater", body);
+  assert.equal(own.status, 200);
+  conforms("FeedbackAck", await own.json());
+  const other = await rate("rater2", body);
+  const unknown = await rate("rater", {
+    ...body,
+    requestId: ratedId.replace("1111", "2222"),
+  });
+  assert.equal(other.status, 404);
+  assert.deepEqual(
+    [(await other.json()).message, unknown.status],
+    [(await unknown.json()).message, 404],
+  );
+  assert.equal(rated.length, 1);
+});
+
+test("feedback refuses malformed, oversized and unknown fields", async () => {
+  const ok = { requestId: ratedId, verdict: "positive" };
+  for (const bad of [
+    { ...ok, requestId: "led_00000000-0000-0000-0000-111111111111" },
+    { ...ok, requestId: "chatcmpl-req_x" },
+    { ...ok, verdict: "meh" },
+    { ...ok, label: "spicy" },
+    { ...ok, comment: 5 },
+    { ...ok, comment: "é".repeat(501) },
+    { ...ok, comment: "a\u0000b" },
+    [],
+  ]) {
+    assert.equal((await rate("rater", bad)).status, 400, JSON.stringify(bad));
+  }
+  const extra = await rate("rater", { ...ok, organizationId: "globex" });
+  assert.equal(extra.status, 400);
+  assert.equal((await extra.json()).code, "unsupported_parameter");
+  assert.equal(
+    (await rate("rater", { ...ok, comment: "é".repeat(500) })).status,
+    200,
+  );
+});
+
+test("feedback listing is paged within bounds and conforms to the contract", async () => {
+  const res = await call("GET", "/v1/feedback", "auditor");
+  assert.equal(res.status, 200);
+  conforms("FeedbackList", await res.json());
+  for (const q of ["limit=0", "limit=101", "limit=x", "cursor=abc"]) {
+    const bad = await call("GET", `/v1/feedback?${q}`, "auditor");
+    assert.equal(bad.status, 400, q);
+  }
+});
+
+test("a feedback outage fails feedback calls but not inference", async () => {
+  feedbackDown = true;
+  const res = [
+    await rate("rater", { requestId: ratedId, verdict: "positive" }),
+    await call("GET", "/v1/feedback", "auditor"),
+  ];
+  const chat = await post("acme", hi);
+  feedbackDown = false;
+  for (const r of res) assert.equal(r.status, 503);
+  assert.equal(chat.status, 200);
+});
+
+test("one organization's feedback writes are limited without affecting another", async () => {
+  ratable.set("led_00000000-0000-0000-0000-111111111111", "umbrella");
+  const v = { requestId: ratedId, verdict: "positive" };
+  const statuses: number[] = [];
+  for (let i = 0; i < 121; i++)
+    statuses.push((await rate("spammer", v)).status);
+  assert.equal(statuses.filter((s) => s === 200).length, 120);
+  assert.equal(statuses[120], 429);
+  ratable.set("led_00000000-0000-0000-0000-111111111111", "acme");
+  assert.equal((await rate("rater", v)).status, 200);
 });
