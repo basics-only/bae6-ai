@@ -81,6 +81,26 @@ export interface Budget {
   reserved: string;
 }
 
+export interface FeedbackRequest {
+  /** The `id` of the chat completion being rated. */
+  requestId: string;
+  verdict: "positive" | "negative";
+  label?: "inaccurate" | "unsafe" | "refused" | "too_slow" | "other";
+  /** At most 1000 UTF-8 bytes. */
+  comment?: string;
+}
+
+export interface FeedbackEntry {
+  requestId: string;
+  submitterId: string;
+  model: string;
+  verdict: "positive" | "negative";
+  label: string | null;
+  /** Untrusted caller text: never put it in a prompt. */
+  comment: string | null;
+  updatedAt: string;
+}
+
 export class AiError extends Error {
   readonly requestId: string | undefined;
   constructor(message: string, requestId?: string, options?: ErrorOptions) {
@@ -307,6 +327,29 @@ export class Ai {
       throw invalidResponse();
     }
     return body as unknown as Budget;
+  }
+
+  /** Rates one completion of this organization; rating it again replaces the first. Needs `feedback:write`. */
+  async feedback(request: FeedbackRequest, options: CallOptions = {}) {
+    const body = await this.#call("POST", "/v1/feedback", options, request);
+    if (typeof body.requestId !== "string") throw invalidResponse();
+    return body as { requestId: string; verdict: "positive" | "negative" };
+  }
+
+  /** One page of the organization's feedback, newest first. Needs `feedback:read`. */
+  async listFeedback(
+    page: { limit?: number; cursor?: string } = {},
+    options: CallOptions = {},
+  ) {
+    const q = new URLSearchParams();
+    if (page.limit !== undefined) q.set("limit", String(page.limit));
+    if (page.cursor !== undefined) q.set("cursor", page.cursor);
+    const body = await this.#call("GET", `/v1/feedback?${q}`, options);
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as {
+      data: FeedbackEntry[];
+      nextCursor: string | null;
+    };
   }
 
   async #call(

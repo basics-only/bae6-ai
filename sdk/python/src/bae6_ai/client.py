@@ -251,6 +251,50 @@ class Ai:
             raise _invalid_response()
         return body
 
+    async def feedback(
+        self,
+        *,
+        request_id: str,
+        verdict: str,
+        label: str | None = None,
+        comment: str | None = None,
+        end_user_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Rates one chat completion (its `id`) of this organization; a second rating replaces it.
+
+        Needs `feedback:write`. `comment` is at most 1000 UTF-8 bytes.
+        """
+        payload = {"requestId": request_id, "verdict": verdict}
+        if label is not None:
+            payload["label"] = label
+        if comment is not None:
+            payload["comment"] = comment
+        body = await self._call("POST", "/v1/feedback", end_user_token, None, payload)
+        if not isinstance(body.get("requestId"), str):
+            raise _invalid_response()
+        return body
+
+    async def list_feedback(
+        self,
+        *,
+        limit: int | None = None,
+        cursor: str | None = None,
+        end_user_token: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of the organization's feedback, newest first; needs `feedback:read`.
+
+        Comments are untrusted caller text: never put one in a prompt.
+        """
+        params = {}
+        if limit is not None:
+            params["limit"] = str(limit)
+        if cursor is not None:
+            params["cursor"] = cursor
+        body = await self._call("GET", "/v1/feedback", end_user_token, None, None, params)
+        if not isinstance(body.get("data"), list):
+            raise _invalid_response()
+        return body
+
     async def _call(
         self,
         method: str,

@@ -15,6 +15,7 @@ import {
   type Usage,
 } from "@bae6/ai-core";
 import type { ModelConfig } from "./config.js";
+import { type Feedback, parseFeedback } from "./feedback.js";
 import { envelope, HttpError, readBody, send } from "./http.js";
 import { type Identity, identify, type Verifier } from "./identity.js";
 import type { Caller, Ledger, Outcome } from "./ledger.js";
@@ -34,6 +35,7 @@ export interface GatewayModel {
 export interface GatewayDeps {
   verify: Verifier;
   ledger: Ledger;
+  feedback: Feedback;
   models: Map<string, GatewayModel>;
   /** Monthly limit per organization; an organization without one cannot spend. */
   budgets: Record<string, string>;
@@ -48,6 +50,10 @@ export interface GatewayDeps {
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOKENS = 1024;
 const MAX_USAGE_WINDOW_MS = 93 * 24 * 3600_000;
+const MAX_FEEDBACK_BODY_BYTES = 16 * 1024;
+const MAX_FEEDBACK_PAGE = 100;
+const FEEDBACK_PER_WINDOW = 120;
+const FEEDBACK_WINDOW_MS = 60_000;
 const REQUEST_ID = /^[A-Za-z0-9._-]{1,64}$/;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._-]{8,128}$/;
 
@@ -102,7 +108,9 @@ function providerHttpError(err: unknown, timedOut: boolean): HttpError {
 }
 
 export function createGateway(deps: GatewayDeps) {
-  const { ledger, models, log = () => {} } = deps;
+  const { ledger, feedback, models, log = () => {} } = deps;
+  // shortcut: fixed window per replica, so N replicas allow N times the limit; share it if that matters.
+  const feedbackWindows = new Map<string, { start: number; count: number }>();
   let draining = false;
   let inflight = 0;
   const inflightByOrg = new Map<string, number>();
@@ -120,6 +128,13 @@ export function createGateway(deps: GatewayDeps) {
     read.catch((err: Error) => {
       log({ msg: "ledger_unavailable", error: err.name });
       throw new HttpError(503, "unavailable", "Metering is unavailable.", 1);
+    });
+
+  // Feedback is off the inference path: its outage fails only feedback calls.
+  const feedbackStore = <T>(read: Promise<T>) =>
+    read.catch((err: Error) => {
+      log({ msg: "feedback_unavailable", error: err.name });
+      throw new HttpError(503, "unavailable", "Feedback is unavailable.", 1);
     });
 
   function resolve(id: string, who: Who, op: Operation): GatewayModel {
@@ -555,6 +570,68 @@ export function createGateway(deps: GatewayDeps) {
         to: to.toISOString(),
         data: await metering(ledger.usage(who, from, to)),
       });
+    }
+
+    if (endpoint === "POST /v1/feedback") {
+      requireScope(who, "feedback:write");
+      const now = Date.now();
+      const w = feedbackWindows.get(who.organizationId);
+      if (!w || now - w.start >= FEEDBACK_WINDOW_MS) {
+        for (const [org, old] of feedbackWindows) {
+          if (now - old.start >= FEEDBACK_WINDOW_MS)
+            feedbackWindows.delete(org);
+        }
+        feedbackWindows.set(who.organizationId, { start: now, count: 1 });
+      } else if (++w.count > FEEDBACK_PER_WINDOW) {
+        throw new HttpError(
+          429,
+          "rate_limited",
+          "This organization is submitting feedback too fast.",
+          Math.ceil((w.start + FEEDBACK_WINDOW_MS - now) / 1000),
+        );
+      }
+      const { json } = await readBody(req, MAX_FEEDBACK_BODY_BYTES);
+      const input = parseFeedback(json);
+      const found = await feedbackStore(
+        feedback.submit({
+          ...input,
+          organizationId: who.organizationId,
+          submitterId: who.subjectId,
+        }),
+      );
+      if (!found) throw new HttpError(404, "not_found", "Request not found.");
+      return send(res, 200, {
+        requestId: `chatcmpl-${input.requestId}`,
+        verdict: input.verdict,
+      });
+    }
+    if (endpoint === "GET /v1/feedback") {
+      requireScope(who, "feedback:read");
+      const limit = Number(url.searchParams.get("limit") ?? 50);
+      const cursor = url.searchParams.get("cursor");
+      if (
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > MAX_FEEDBACK_PAGE ||
+        (cursor !== null && !/^[0-9]{1,15}$/.test(cursor))
+      ) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          `limit is 1 to ${MAX_FEEDBACK_PAGE} and cursor is one returned by a previous page.`,
+        );
+      }
+      return send(
+        res,
+        200,
+        await feedbackStore(
+          feedback.list(
+            who.organizationId,
+            limit,
+            cursor === null ? null : Number(cursor),
+          ),
+        ),
+      );
     }
 
     const invoke =

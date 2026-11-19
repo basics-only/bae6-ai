@@ -8,6 +8,7 @@ import {
 import pg from "pg";
 import { type ModelConfig, parseConfig } from "./config.js";
 import { awsCredentials, gcpToken } from "./credentials.js";
+import { createFeedback } from "./feedback.js";
 import { createVerifier, type Issuer } from "./identity.js";
 import { createLedger } from "./ledger.js";
 import { migrate } from "./migrate.js";
@@ -126,10 +127,13 @@ const ledger = createLedger(pool, {
   priceBookVersion: config.priceBook.version,
 });
 await ledger.publishPrices(config.priceBook.prices);
+const feedback = createFeedback(pool);
+const feedbackRetentionDays = int("BAE6_FEEDBACK_RETENTION_DAYS", 90, 1, 3650);
 
 const server = createGateway({
   verify: createVerifier(issuers, { allowHttpJwks }),
   ledger,
+  feedback,
   models,
   budgets: config.budgets,
   timeoutMs,
@@ -150,6 +154,9 @@ const reconciler = setInterval(() => {
     .catch((err) =>
       log({ msg: "reconcile_failed", error: (err as Error).name }),
     );
+  feedback
+    .prune(feedbackRetentionDays)
+    .catch((err) => log({ msg: "prune_failed", error: (err as Error).name }));
 }, 30_000);
 reconciler.unref();
 
