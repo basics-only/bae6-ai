@@ -28,6 +28,11 @@ test("accepts a bedrock endpoint that is a bare origin", () => {
   assert.equal(parsed.models[0]?.endpoint, "http://mock-bedrock:8080");
 });
 
+test("stores the normalized origin so a gate on it cannot be bypassed by case or whitespace", () => {
+  const parsed = parseConfig(config({ endpoint: " HTTP://Mock:8080/ " }));
+  assert.equal(parsed.models[0]?.endpoint, "http://mock:8080");
+});
+
 test("rejects endpoints that carry a path, credentials or the wrong provider", () => {
   for (const endpoint of [
     "https://host/path",
@@ -35,6 +40,7 @@ test("rejects endpoints that carry a path, credentials or the wrong provider", (
     "https://host?a=1",
     "ftp://host",
     "not a url",
+    42,
   ]) {
     assert.throws(() => parseConfig(config({ endpoint })), /invalid endpoint/);
   }

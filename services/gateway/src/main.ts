@@ -44,14 +44,22 @@ if (!rawConfig) {
 }
 const config = parseConfig(JSON.parse(rawConfig));
 
-const allowHttpEndpoints = env.BAE6_ALLOW_HTTP_PROVIDER_ENDPOINTS === "true";
-if (allowHttpEndpoints && env.NODE_ENV === "production") {
-  throw new Error("BAE6_ALLOW_HTTP_PROVIDER_ENDPOINTS is for development only");
+// Signed requests carry real AWS credentials, so only AWS hosts are allowed outside development.
+const allowCustomEndpoints =
+  env.BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS === "true";
+if (allowCustomEndpoints && env.NODE_ENV === "production") {
+  throw new Error(
+    "BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS is for development only",
+  );
 }
 for (const m of config.models) {
-  if (m.endpoint?.startsWith("http:") && !allowHttpEndpoints) {
+  if (
+    m.endpoint !== undefined &&
+    !new URL(m.endpoint).hostname.endsWith(".amazonaws.com") &&
+    !allowCustomEndpoints
+  ) {
     throw new Error(
-      `model ${m.id}: http endpoint needs BAE6_ALLOW_HTTP_PROVIDER_ENDPOINTS`,
+      `model ${m.id}: endpoint is not an AWS host; needs BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS`,
     );
   }
 }
@@ -85,9 +93,7 @@ const models = new Map<string, GatewayModel>(
             modelId: m.providerModel,
             region: m.region,
             credentials: aws,
-            ...(m.endpoint === undefined
-              ? {}
-              : { endpoint: new URL(m.endpoint).origin }),
+            ...(m.endpoint === undefined ? {} : { endpoint: m.endpoint }),
           })
         : vertexProvider({
             descriptor: descriptor(m),

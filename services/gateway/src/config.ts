@@ -118,6 +118,8 @@ export function parseConfig(raw: unknown): GatewayConfig {
     if (m.endpoint !== undefined) {
       const url = bedrockEndpoint(m.endpoint);
       if (m.provider !== "bedrock" || url === null) bad("endpoint");
+      // Keep the normalized origin so later checks see what will really be called.
+      m.endpoint = (url as URL).origin;
     }
     const ops = m.operations;
     if (
