@@ -44,6 +44,18 @@ if (!rawConfig) {
 }
 const config = parseConfig(JSON.parse(rawConfig));
 
+const allowHttpEndpoints = env.BAE6_ALLOW_HTTP_PROVIDER_ENDPOINTS === "true";
+if (allowHttpEndpoints && env.NODE_ENV === "production") {
+  throw new Error("BAE6_ALLOW_HTTP_PROVIDER_ENDPOINTS is for development only");
+}
+for (const m of config.models) {
+  if (m.endpoint?.startsWith("http:") && !allowHttpEndpoints) {
+    throw new Error(
+      `model ${m.id}: http endpoint needs BAE6_ALLOW_HTTP_PROVIDER_ENDPOINTS`,
+    );
+  }
+}
+
 const port = int("PORT", 8080, 1, 65535);
 const timeoutMs = int("BAE6_PROVIDER_TIMEOUT_MS", 60_000, 1000, 300_000);
 const maxInflight = int("BAE6_MAX_INFLIGHT", 64, 1, 10_000);
@@ -73,6 +85,9 @@ const models = new Map<string, GatewayModel>(
             modelId: m.providerModel,
             region: m.region,
             credentials: aws,
+            ...(m.endpoint === undefined
+              ? {}
+              : { endpoint: new URL(m.endpoint).origin }),
           })
         : vertexProvider({
             descriptor: descriptor(m),

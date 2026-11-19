@@ -8,6 +8,8 @@ export interface ModelConfig {
   region: string;
   /** Vertex only. */
   project?: string;
+  /** Bedrock only. Replaces the AWS host; for mocks and private endpoints. */
+  endpoint?: string;
   operations: Operation[];
   inputModalities: Modality[];
   maxInputTokens: number;
@@ -36,6 +38,24 @@ const MODALITIES = new Set(["text", "image"]);
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** An origin with no path, credentials or query, so requests cannot be steered elsewhere. */
+export function bedrockEndpoint(v: unknown): URL | null {
+  if (typeof v !== "string") return null;
+  try {
+    const u = new URL(v);
+    const plain =
+      (u.protocol === "https:" || u.protocol === "http:") &&
+      u.username === "" &&
+      u.password === "" &&
+      u.search === "" &&
+      u.hash === "" &&
+      u.pathname === "/";
+    return plain ? u : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Validates the whole file up front so a bad config stops start-up, not a request. */
 export function parseConfig(raw: unknown): GatewayConfig {
@@ -95,6 +115,10 @@ export function parseConfig(raw: unknown): GatewayConfig {
       (typeof m.project !== "string" || !PROJECT.test(m.project))
     )
       bad("project");
+    if (m.endpoint !== undefined) {
+      const url = bedrockEndpoint(m.endpoint);
+      if (m.provider !== "bedrock" || url === null) bad("endpoint");
+    }
     const ops = m.operations;
     if (
       !Array.isArray(ops) ||
