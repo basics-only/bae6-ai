@@ -26,10 +26,14 @@ function int(name: string, fallback: number, min: number, max: number) {
 
 const databaseUrl = env.BAE6_DATABASE_URL;
 if (!databaseUrl) throw new Error("BAE6_DATABASE_URL is required");
-const allowHttpJwks = env.BAE6_ALLOW_HTTP_JWKS === "true";
-if (allowHttpJwks && env.NODE_ENV === "production") {
-  throw new Error("BAE6_ALLOW_HTTP_JWKS is for development only");
+function devOnly(name: string) {
+  const on = env[name] === "true";
+  if (on && env.NODE_ENV !== "development") {
+    throw new Error(`${name} requires NODE_ENV=development`);
+  }
+  return on;
 }
+const allowHttpJwks = devOnly("BAE6_ALLOW_HTTP_JWKS");
 const issuers = JSON.parse(env.BAE6_AI_ISSUERS ?? "null") as Issuer[] | null;
 if (!Array.isArray(issuers)) {
   throw new Error(
@@ -45,13 +49,7 @@ if (!rawConfig) {
 const config = parseConfig(JSON.parse(rawConfig));
 
 // Signed requests carry real AWS credentials, so only AWS hosts are allowed outside development.
-const allowCustomEndpoints =
-  env.BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS === "true";
-if (allowCustomEndpoints && env.NODE_ENV === "production") {
-  throw new Error(
-    "BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS is for development only",
-  );
-}
+const allowCustomEndpoints = devOnly("BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS");
 for (const m of config.models) {
   if (
     m.endpoint !== undefined &&
