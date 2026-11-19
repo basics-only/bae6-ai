@@ -15,6 +15,9 @@ const finalized: Outcome[] = [];
 const keys: string[] = [];
 let fail: ProviderError | undefined;
 let ledgerDown = false;
+let hold: Promise<void> | undefined;
+let entered = 0;
+let held = 0;
 
 const ledger = {
   reserve: async () => {
@@ -73,6 +76,7 @@ const provider = {
     attributes: { provider: "bedrock", inputModalities: ["text"] },
   },
   chat: async () => {
+    if (++entered <= held) await hold;
     if (fail) throw fail;
     return { text: "hello", finishReason: "stop", usage };
   },
@@ -134,6 +138,7 @@ const server = createGateway({
   budgets: { acme: "10", globex: "10" },
   timeoutMs: 5000,
   maxInflight: 8,
+  maxInflightPerOrg: 2,
   ready: async () => true,
 });
 let base: string;
@@ -325,4 +330,26 @@ test("budget and usage reads fail closed with 503 when metering is down", async 
     assert.equal(r.status, 503);
     assert.equal(((await r.json()) as { code: string }).code, "unavailable");
   }
+});
+
+test("one organization at its concurrency limit is refused while others are served", async () => {
+  let release!: () => void;
+  hold = new Promise((r) => (release = r));
+  entered = 0;
+  held = 2;
+  const open = { ...hi, model: "open" };
+  const calls = [post("acme", open), post("acme", open)];
+  while (entered < 2) await new Promise((r) => setTimeout(r, 5));
+  const over = await post("acme", open);
+  assert.equal(over.status, 429);
+  assert.equal(over.headers.get("retry-after"), "1");
+  const other = await post("globex", open);
+  assert.equal(other.status, 200);
+  held = 0;
+  release();
+  assert.deepEqual(
+    (await Promise.all(calls)).map((r) => r.status),
+    [200, 200],
+  );
+  assert.equal((await post("acme", open)).status, 200);
 });
