@@ -65,6 +65,12 @@ for (const m of config.models) {
 const port = int("PORT", 8080, 1, 65535);
 const timeoutMs = int("BAE6_PROVIDER_TIMEOUT_MS", 60_000, 1000, 300_000);
 const maxInflight = int("BAE6_MAX_INFLIGHT", 64, 1, 10_000);
+const maxInflightPerOrg = int(
+  "BAE6_MAX_INFLIGHT_PER_ORG",
+  maxInflight,
+  1,
+  maxInflight,
+);
 // Size so pool max x max replicas fits the database's share of connections (ADR-0007).
 const poolMax = int("BAE6_DB_POOL_MAX", 10, 1, 100);
 const shutdownDelayMs = int("BAE6_SHUTDOWN_DELAY_MS", 0, 0, 15_000);
@@ -128,6 +134,7 @@ const server = createGateway({
   budgets: config.budgets,
   timeoutMs,
   maxInflight,
+  maxInflightPerOrg,
   log,
   ready: async () => {
     await pool.query("SELECT 1");
