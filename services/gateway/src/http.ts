@@ -32,19 +32,35 @@ export function envelope(err: HttpError, requestId: string) {
 export async function readBody(
   req: IncomingMessage,
   maxBytes: number,
+  deadlineMs = 15_000,
 ): Promise<{ json: unknown; sha256: string }> {
   const chunks: Buffer[] = [];
   let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > maxBytes) {
-      throw new HttpError(
-        413,
-        "payload_too_large",
-        `Body over ${maxBytes} bytes.`,
-      );
+  const idle = () =>
+    setTimeout(
+      () =>
+        req.destroy(
+          new HttpError(408, "request_timeout", "Body stopped arriving."),
+        ),
+      deadlineMs,
+    );
+  let timer = idle();
+  try {
+    for await (const chunk of req) {
+      clearTimeout(timer);
+      timer = idle();
+      size += chunk.length;
+      if (size > maxBytes) {
+        throw new HttpError(
+          413,
+          "payload_too_large",
+          `Body over ${maxBytes} bytes.`,
+        );
+      }
+      chunks.push(chunk);
     }
-    chunks.push(chunk);
+  } finally {
+    clearTimeout(timer);
   }
   const raw = Buffer.concat(chunks);
   try {
