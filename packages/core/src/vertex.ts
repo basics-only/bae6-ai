@@ -1,4 +1,4 @@
-import { chunks, count, json, post } from "./http.js";
+import { count, json, post, sseLines } from "./http.js";
 import { prepare, requireOperation } from "./request.js";
 import {
   type ChatRequest,
@@ -21,8 +21,6 @@ export interface VertexModel {
   /** Overrides `https://<region>-aiplatform.googleapis.com`, for tests. */
   endpoint?: string;
 }
-
-const MAX_SSE_LINE = 1024 * 1024;
 
 const finish = (reason: unknown): FinishReason =>
   reason === "STOP" ? "stop" : reason === "MAX_TOKENS" ? "length" : "other";
@@ -49,26 +47,6 @@ function usageOf(u: Record<string, unknown> | undefined): Usage {
         (u?.thoughtsTokenCount === undefined ? 0 : count(u.thoughtsTokenCount))
       : count(u.totalTokenCount) - inputTokens;
   return { inputTokens, outputTokens: count(outputTokens) };
-}
-
-/** The body's lines without line endings, including a last unterminated one. */
-async function* sseLines(res: Response): AsyncGenerator<string> {
-  const tooLong = () =>
-    new ProviderError("provider stream line too long", "unknown");
-  let pending = "";
-  const decoder = new TextDecoder();
-  for await (const c of chunks(res)) {
-    pending += decoder.decode(c, { stream: true });
-    const lines = pending.split("\n");
-    pending = lines.pop() ?? "";
-    if (pending.length > MAX_SSE_LINE) throw tooLong();
-    for (const line of lines) {
-      if (line.length > MAX_SSE_LINE) throw tooLong();
-      yield line.replace(/\r$/, "");
-    }
-  }
-  pending += decoder.decode();
-  if (pending) yield pending.replace(/\r$/, "");
 }
 
 /** Vertex AI generateContent for chat, predict for embeddings. */

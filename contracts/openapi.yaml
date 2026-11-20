@@ -376,8 +376,10 @@ components:
                   models per request. Clients ignore kinds they do not know.
                 enum: [model, route]
               owned_by:
-                description: Present for a `model`; a `route` has no single provider.
-                enum: [bedrock, vertex]
+                description: >-
+                  Present for a `model`; a `route` has no single provider. Unknown values
+                  may appear in later versions; clients tolerate them.
+                enum: [bedrock, vertex, huggingface]
               capabilities:
                 $ref: "./vendor/schemas/capability-descriptor.json"
     ContentPart:

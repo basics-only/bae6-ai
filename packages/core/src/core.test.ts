@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { crc32 } from "node:zlib";
 import { bedrockProvider } from "./bedrock.js";
 import { encodeFrame, frames } from "./eventstream.js";
+import { huggingfaceOrigin, huggingfaceProvider } from "./huggingface.js";
 import { signV4 } from "./sigv4.js";
 import {
   type ChatRequest,
@@ -54,7 +55,7 @@ const sendJson = (res: ServerResponse, status: number, body: unknown) => {
 
 const descriptor = (
   id: string,
-  provider: "bedrock" | "vertex",
+  provider: "bedrock" | "vertex" | "huggingface",
   inputModalities: ("text" | "image")[] = ["text", "image"],
 ): ModelDescriptor => ({
   kind: "model",
@@ -472,6 +473,178 @@ test("Vertex bills thinking tokens, reads an unterminated last line, and a strea
       collect(p.stream(request())),
       (err) => err instanceof ProviderError && err.billed === "unknown",
     );
+  } finally {
+    server.close();
+  }
+});
+
+const hf = (url: string, token = "hf_test") =>
+  huggingfaceProvider({
+    descriptor: {
+      ...descriptor("llama", "huggingface"),
+      operations: ["chat", "chat_stream"],
+    },
+    model: "meta-llama/Llama-3.1-8B-Instruct",
+    endpoint: url,
+    token,
+    allowAnyHost: true,
+  });
+
+test("Hugging Face chat and SSE streaming map to the common shapes", async () => {
+  const server = await mock((s, res) => {
+    if (!s.body.stream) {
+      return sendJson(res, 200, {
+        choices: [{ message: { content: "Hello" }, finish_reason: "length" }],
+        usage: { prompt_tokens: 7, completion_tokens: 3 },
+      });
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(
+      [
+        'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        'data: {"choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}',
+        "data: [DONE]",
+        "",
+      ].join("\n\n"),
+    );
+  });
+  try {
+    const p = hf(server.url);
+    assert.deepEqual(await p.chat(request()), {
+      text: "Hello",
+      finishReason: "length",
+      usage: { inputTokens: 7, outputTokens: 3 },
+    });
+    assert.equal(server.seen[0]?.path, "/v1/chat/completions");
+    assert.equal(server.seen[0]?.headers.authorization, "Bearer hf_test");
+    assert.deepEqual(server.seen[0]?.body, {
+      model: "meta-llama/Llama-3.1-8B-Instruct",
+      messages: [
+        { role: "system", content: "Be brief." },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "What is this?" },
+            {
+              type: "image_url",
+              image_url: { url: "data:image/png;base64,aGVsbG8=" },
+            },
+          ],
+        },
+      ],
+      max_tokens: 64,
+    });
+    assert.deepEqual(await collect(p.stream(request())), [
+      { type: "delta", text: "Hi" },
+      {
+        type: "done",
+        finishReason: "stop",
+        usage: { inputTokens: 4, outputTokens: 2 },
+      },
+    ]);
+    assert.deepEqual(server.seen[1]?.body.stream_options, {
+      include_usage: true,
+    });
+  } finally {
+    server.close();
+  }
+});
+
+test("Hugging Face: an error answer is not billed; a missing usage, an early end or a redirect may be", async () => {
+  let mode = "error";
+  const server = await mock((_, res) => {
+    if (mode === "error") return sendJson(res, 503, { error: "starting" });
+    if (mode === "redirect") {
+      res.writeHead(302, { location: "http://127.0.0.1:1/steal" });
+      return res.end();
+    }
+    if (mode === "nousage") {
+      return sendJson(res, 200, {
+        choices: [{ message: { content: "x" }, finish_reason: "stop" }],
+      });
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n');
+  });
+  try {
+    const p = hf(server.url);
+    await assert.rejects(
+      p.chat(request()),
+      (err) =>
+        err instanceof ProviderError &&
+        err.billed === "no" &&
+        err.status === 503,
+    );
+    for (const m of ["redirect", "nousage"]) {
+      mode = m;
+      await assert.rejects(
+        p.chat(request()),
+        (err) => err instanceof ProviderError && err.billed === "unknown",
+      );
+    }
+    mode = "early";
+    await assert.rejects(
+      collect(p.stream(request())),
+      (err) => err instanceof ProviderError && err.billed === "unknown",
+    );
+  } finally {
+    server.close();
+  }
+});
+
+test("the Hugging Face token only goes to Hugging Face hosts", () => {
+  for (const ok of [
+    "https://router.huggingface.co",
+    "https://abc-123.endpoints.huggingface.cloud/",
+  ]) {
+    assert.ok(huggingfaceOrigin(ok));
+  }
+  for (const bad of [
+    "http://router.huggingface.co",
+    "https://router.huggingface.co.evil.com",
+    "https://evil.com/router.huggingface.co",
+    "https://user:pw@router.huggingface.co",
+    "https://router.huggingface.co:8443",
+    "https://router.huggingface.co/v1",
+    "https://x.endpoints.huggingface.cloud.evil.com",
+    "https://endpoints.huggingface.cloud",
+    "https://a.b.endpoints.huggingface.cloud",
+    "https://huggingface.co",
+    "not a url",
+    42,
+  ]) {
+    assert.equal(huggingfaceOrigin(bad), null, String(bad));
+    if (typeof bad === "string") {
+      assert.throws(() =>
+        huggingfaceProvider({
+          descriptor: descriptor("llama", "huggingface"),
+          model: "m",
+          endpoint: bad,
+          token: "hf_test",
+        }),
+      );
+    }
+  }
+});
+
+test("Hugging Face does not embed and rejects images a model does not accept", async () => {
+  const server = await mock((_, res) => sendJson(res, 500, {}));
+  try {
+    const p = hf(server.url);
+    await assert.rejects(
+      p.embed(["x"], AbortSignal.timeout(2000)),
+      UnsupportedOperation,
+    );
+    const textOnly = huggingfaceProvider({
+      descriptor: descriptor("t", "huggingface", ["text"]),
+      model: "m",
+      endpoint: server.url,
+      token: "hf_test",
+      allowAnyHost: true,
+    });
+    await assert.rejects(textOnly.chat(request()), UnsupportedOperation);
+    assert.equal(server.seen.length, 0);
   } finally {
     server.close();
   }

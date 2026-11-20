@@ -136,6 +136,15 @@ function providerHttpError(err: unknown, timedOut: boolean): HttpError {
         2,
       );
     }
+    // A dedicated endpoint scaled to zero answers 503 while it starts; the client retries, we do not.
+    if (err.status === 503) {
+      return new HttpError(
+        503,
+        "unavailable",
+        "The model is not available yet.",
+        5,
+      );
+    }
     if (err.status === 400) {
       return new HttpError(
         400,

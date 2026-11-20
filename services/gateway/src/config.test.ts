@@ -55,6 +55,62 @@ test("rejects a route to a model that cannot chat", () => {
   assert.throws(() => parseConfig(embedOnly), /invalid default/);
 });
 
+const hf =(extra: Record<string, unknown> = {}) =>
+  config({
+    provider: "huggingface",
+    providerModel: "meta-llama/Llama-3.1-8B-Instruct",
+    region: undefined,
+    hosting: "dedicated",
+    endpoint: "https://abc.endpoints.huggingface.cloud",
+    tokenEnv: "BAE6_HF_TOKEN_LLAMA",
+    ...extra,
+  });
+
+test("accepts Hugging Face dedicated endpoints and org-limited Inference Providers", () => {
+  assert.equal(parseConfig(hf()).models[0]?.hosting, "dedicated");
+  const shared = hf({
+    hosting: "inference-providers",
+    endpoint: undefined,
+    organizations: ["acme"],
+  });
+  assert.equal(parseConfig(shared).models[0]?.hosting, "inference-providers");
+});
+
+test("refuses Hugging Face configs that could send the token or prompts somewhere unintended", () => {
+  for (const bad of [
+    { tokenEnv: "BAE6_DATABASE_URL" },
+    { tokenEnv: "BAE6_HF_TOKEN_" },
+    { tokenEnv: undefined },
+    { endpoint: "https://evil.example" },
+    { endpoint: "https://abc.endpoints.huggingface.cloud.evil.example" },
+    { endpoint: "http://abc.endpoints.huggingface.cloud" },
+    { endpoint: undefined },
+    { hosting: "elsewhere" },
+    { hosting: undefined },
+    { hosting: "inference-providers", endpoint: undefined },
+    {
+      hosting: "inference-providers",
+      endpoint: "https://abc.endpoints.huggingface.cloud",
+      organizations: ["acme"],
+    },
+    { hosting: "inference-providers", endpoint: undefined, organizations: [] },
+    { region: "us-east-1" },
+    { operations: ["chat", "embed"] },
+  ]) {
+    assert.throws(() => parseConfig(hf(bad)), /invalid|gateway config/);
+  }
+  assert.throws(
+    () => parseConfig(config({ tokenEnv: "BAE6_HF_TOKEN_X" })),
+    /invalid hosting or tokenEnv/,
+  );
+});
+
+test("refuses a Bedrock or Vertex model whose region is missing or not a string", () => {
+  for (const region of [undefined, null, 7]) {
+    assert.throws(() => parseConfig(config({ region })), /invalid region/);
+  }
+});
+
 test("accepts a bedrock endpoint that is a bare origin", () => {
   const parsed = parseConfig(config({ endpoint: "http://mock-bedrock:8080" }));
   assert.equal(parsed.models[0]?.endpoint, "http://mock-bedrock:8080");
