@@ -57,6 +57,17 @@ export function bedrockEndpoint(v: unknown): URL | null {
   }
 }
 
+/** Models whose endpoint is not an AWS host; signed requests would send real credentials there. */
+export function nonAwsEndpointModels(config: GatewayConfig): string[] {
+  return config.models
+    .filter(
+      (m) =>
+        m.endpoint !== undefined &&
+        !new URL(m.endpoint).hostname.endsWith(".amazonaws.com"),
+    )
+    .map((m) => m.id);
+}
+
 /** Validates the whole file up front so a bad config stops start-up, not a request. */
 export function parseConfig(raw: unknown): GatewayConfig {
   const fail = (msg: string): never => {

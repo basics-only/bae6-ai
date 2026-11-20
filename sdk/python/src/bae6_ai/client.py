@@ -81,7 +81,9 @@ def _http_error(status: int, parsed: object) -> AiApiError:
 
 
 def _invalid_response() -> AiApiError:
-    return AiApiError(200, "invalid_response", "the gateway returned an unusable response")
+    return AiApiError(
+        200, "invalid_response", "the gateway returned an unusable response"
+    )
 
 
 def _parse(text: bytes) -> object:
@@ -144,12 +146,23 @@ class Ai:
         temperature: float | None = None,
         end_user_token: str | None = None,
         idempotency_key: str | None = None,
+        task_type: str | None = None,
+        domain: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
+        """`task_type` and `domain` must be ids the organization has defined; `run_id` groups calls."""
         payload = _chat_payload(model, messages, max_completion_tokens, temperature)
         body = await self._call(
-            "POST", "/v1/chat/completions", end_user_token, idempotency_key, payload
+            "POST",
+            "/v1/chat/completions",
+            end_user_token,
+            idempotency_key,
+            payload,
+            tags=_tags(task_type, domain, run_id),
         )
-        if not isinstance(body.get("choices"), list) or not isinstance(body.get("usage"), dict):
+        if not isinstance(body.get("choices"), list) or not isinstance(
+            body.get("usage"), dict
+        ):
             raise _invalid_response()
         return body
 
@@ -161,6 +174,9 @@ class Ai:
         max_completion_tokens: int | None = None,
         temperature: float | None = None,
         end_user_token: str | None = None,
+        task_type: str | None = None,
+        domain: str | None = None,
+        run_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Yields chunks as the model produces them; the last carries `usage`.
 
@@ -174,7 +190,7 @@ class Ai:
             "POST",
             "/v1/chat/completions",
             json=payload,
-            headers=_headers(end_user_token, None),
+            headers=_headers(end_user_token, None, _tags(task_type, domain, run_id)),
             # Bounds connecting, the wait for the answer, and each gap between chunks.
             timeout=httpx.Timeout(self._timeout),
         )
@@ -210,6 +226,9 @@ class Ai:
         input: str | list[str],
         end_user_token: str | None = None,
         idempotency_key: str | None = None,
+        task_type: str | None = None,
+        domain: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         body = await self._call(
             "POST",
@@ -217,12 +236,15 @@ class Ai:
             end_user_token,
             idempotency_key,
             {"model": model, "input": input},
+            tags=_tags(task_type, domain, run_id),
         )
         if not isinstance(body.get("data"), list):
             raise _invalid_response()
         return body
 
-    async def models(self, *, end_user_token: str | None = None) -> list[dict[str, Any]]:
+    async def models(
+        self, *, end_user_token: str | None = None
+    ) -> list[dict[str, Any]]:
         body = await self._call("GET", "/v1/models", end_user_token, None, None)
         if not isinstance(body.get("data"), list):
             raise _invalid_response()
@@ -239,14 +261,9 @@ class Ai:
 
         Datetimes must be timezone-aware; a naive one has no unambiguous instant.
         """
-        params = {}
-        for key, value in (("from", start), ("to", end)):
-            if value is None:
-                continue
-            if value.utcoffset() is None:
-                raise ValueError(f"{key} must be a timezone-aware datetime")
-            params[key] = value.isoformat()
-        body = await self._call("GET", "/v1/usage", end_user_token, None, None, params)
+        body = await self._call(
+            "GET", "/v1/usage", end_user_token, None, None, _range(start, end)
+        )
         if not isinstance(body.get("data"), list):
             raise _invalid_response()
         return body["data"]
@@ -254,9 +271,18 @@ class Ai:
     async def budget(self, *, end_user_token: str | None = None) -> dict[str, Any]:
         """Money values are decimal strings in the price book's currency."""
         body = await self._call("GET", "/v1/budgets", end_user_token, None, None)
-        if not isinstance(body.get("limit"), str) or not isinstance(body.get("spent"), str):
+        if not isinstance(body.get("limit"), str) or not isinstance(
+            body.get("spent"), str
+        ):
             raise _invalid_response()
         return body
+
+    async def credentials(self, *, end_user_token: str | None = None) -> list[dict[str, Any]]:
+        """Where each configured provider's cloud credentials come from, never the credentials."""
+        body = await self._call("GET", "/v1/credentials", end_user_token, None, None)
+        if not isinstance(body.get("data"), list):
+            raise _invalid_response()
+        return body["data"]
 
     async def feedback(
         self,
@@ -297,7 +323,9 @@ class Ai:
             params["limit"] = str(limit)
         if cursor is not None:
             params["cursor"] = cursor
-        body = await self._call("GET", "/v1/feedback", end_user_token, None, None, params)
+        body = await self._call(
+            "GET", "/v1/feedback", end_user_token, None, None, params
+        )
         if not isinstance(body.get("data"), list):
             raise _invalid_response()
         return body
@@ -368,6 +396,37 @@ class Ai:
             params["cursor"] = cursor
         body = await self._call(
             "GET", "/v1/agent-runs", end_user_token, None, None, params, "agent_runs_url"
+        )
+        if not isinstance(body.get("data"), list):
+            raise _invalid_response()
+        return body
+
+    async def usage_summary(
+        self,
+        *,
+        group_by: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        organization: str | None = None,
+        run_ids: list[str] | None = None,
+        end_user_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Spend, tokens, latency and active users per group; needs `ai:usage:read`.
+
+        `group_by` is organization, taskType, domain, model or run (`run_ids` then names 1 to 50
+        runs). Grouping by organization, or naming another one, needs `ai:usage:platform`.
+        """
+        params = _range(start, end)
+        params["groupBy"] = group_by
+        if organization is not None:
+            params["organization"] = organization
+        body = await self._call(
+            "GET",
+            "/v1/usage/summary",
+            end_user_token,
+            None,
+            None,
+            [*params.items(), *(("runId", r) for r in run_ids or [])],
         )
         if not isinstance(body.get("data"), list):
             raise _invalid_response()
@@ -460,6 +519,32 @@ class Ai:
             raise _invalid_response()
         return body
 
+    async def usage_series(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        group_by: str | None = None,
+        group: str | None = None,
+        organization: str | None = None,
+        end_user_token: str | None = None,
+    ) -> dict[str, Any]:
+        """One point per UTC day, for everything or for one `group` of `group_by`."""
+        params = _range(start, end)
+        for key, value in (
+            ("groupBy", group_by),
+            ("group", group),
+            ("organization", organization),
+        ):
+            if value is not None:
+                params[key] = value
+        body = await self._call(
+            "GET", "/v1/usage/series", end_user_token, None, None, params
+        )
+        if not isinstance(body.get("data"), list):
+            raise _invalid_response()
+        return body
+
     async def cancel_eval_run(
         self, run_id: str, *, end_user_token: str | None = None
     ) -> dict[str, Any]:
@@ -487,6 +572,130 @@ class Ai:
             raise _invalid_response()
         return body
 
+    async def usage_distribution(
+        self,
+        *,
+        measure: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        group_by: str | None = None,
+        group: str | None = None,
+        organization: str | None = None,
+        end_user_token: str | None = None,
+    ) -> dict[str, Any]:
+        """How concentrated usage is across end users; carries no user ids."""
+        params = _range(start, end)
+        for key, value in (
+            ("measure", measure),
+            ("groupBy", group_by),
+            ("group", group),
+            ("organization", organization),
+        ):
+            if value is not None:
+                params[key] = value
+        body = await self._call(
+            "GET", "/v1/usage/distribution", end_user_token, None, None, params
+        )
+        if not isinstance(body.get("data"), list):
+            raise _invalid_response()
+        return body
+
+    async def usage_concentration(
+        self,
+        *,
+        measure: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        group_by: str | None = None,
+        group: str | None = None,
+        organization: str | None = None,
+        end_user_token: str | None = None,
+    ) -> dict[str, Any]:
+        """How the top users' share of usage moves month by month; carries no user ids."""
+        params = _range(start, end)
+        for key, value in (
+            ("measure", measure),
+            ("groupBy", group_by),
+            ("group", group),
+            ("organization", organization),
+        ):
+            if value is not None:
+                params[key] = value
+        body = await self._call(
+            "GET", "/v1/usage/concentration", end_user_token, None, None, params
+        )
+        if not isinstance(body.get("data"), list):
+            raise _invalid_response()
+        return body
+
+    async def list_task_types(
+        self, *, end_user_token: str | None = None
+    ) -> list[dict[str, Any]]:
+        return await self._list_tags("task-types", end_user_token)
+
+    async def list_domains(
+        self, *, end_user_token: str | None = None
+    ) -> list[dict[str, Any]]:
+        return await self._list_tags("domains", end_user_token)
+
+    async def put_task_type(
+        self, id: str, name: str, *, end_user_token: str | None = None
+    ) -> dict[str, Any]:
+        """Creates or renames a task type; needs `ai:usage:admin`. At most 50 per organization."""
+        return await self._put_tag("task-types", id, name, end_user_token)
+
+    async def put_domain(
+        self, id: str, name: str, *, end_user_token: str | None = None
+    ) -> dict[str, Any]:
+        return await self._put_tag("domains", id, name, end_user_token)
+
+    async def delete_task_type(
+        self, id: str, *, end_user_token: str | None = None
+    ) -> None:
+        """Past usage keeps the id; new calls tagged with it are refused."""
+        await self._call(
+            "DELETE",
+            f"/v1/task-types/{quote(id, safe='')}",
+            end_user_token,
+            None,
+            None,
+            empty=True,
+        )
+
+    async def delete_domain(
+        self, id: str, *, end_user_token: str | None = None
+    ) -> None:
+        await self._call(
+            "DELETE",
+            f"/v1/domains/{quote(id, safe='')}",
+            end_user_token,
+            None,
+            None,
+            empty=True,
+        )
+
+    async def _list_tags(
+        self, kind: str, end_user_token: str | None
+    ) -> list[dict[str, Any]]:
+        body = await self._call("GET", f"/v1/{kind}", end_user_token, None, None)
+        if not isinstance(body.get("data"), list):
+            raise _invalid_response()
+        return body["data"]
+
+    async def _put_tag(
+        self, kind: str, id: str, name: str, end_user_token: str | None
+    ) -> dict[str, Any]:
+        body = await self._call(
+            "PUT",
+            f"/v1/{kind}/{quote(id, safe='')}",
+            end_user_token,
+            None,
+            {"name": name},
+        )
+        if not isinstance(body.get("id"), str):
+            raise _invalid_response()
+        return body
+
     async def _call(
         self,
         method: str,
@@ -494,8 +703,10 @@ class Ai:
         end_user_token: str | None,
         idempotency_key: str | None,
         payload: dict[str, Any] | None,
-        params: dict[str, str] | None = None,
+        params: dict[str, str] | list[tuple[str, str]] | None = None,
         worker: str | None = None,
+        tags: dict[str, str] | None = None,
+        empty: bool = False,
     ) -> dict[str, Any]:
         worker_url = self._worker_urls[worker] if worker else None
         if worker and worker_url is None:
@@ -507,7 +718,7 @@ class Ai:
                     worker_url + path if worker_url else path,
                     json=payload,
                     params=params,
-                    headers=_headers(end_user_token, idempotency_key),
+                    headers=_headers(end_user_token, idempotency_key, tags),
                 )
                 response = await self._http.send(request, stream=True)
                 try:
@@ -515,9 +726,13 @@ class Ai:
                 finally:
                     await response.aclose()
         except TimeoutError as e:
-            raise AiTimeoutError(f"the gateway did not answer within {self._timeout} s") from e
+            raise AiTimeoutError(
+                f"the gateway did not answer within {self._timeout} s"
+            ) from e
         except httpx.HTTPError as e:
             raise _transport(e) from None
+        if empty and response.status_code == 204:
+            return {}
         parsed = _parse(raw)
         if response.status_code != 200 and not (worker and response.status_code == 202):
             raise _http_error(response.status_code, parsed)
@@ -540,8 +755,30 @@ def _chat_payload(
     return payload
 
 
-def _headers(end_user_token: str | None, idempotency_key: str | None) -> dict[str, str]:
-    headers = {}
+def _tags(
+    task_type: str | None, domain: str | None, run_id: str | None
+) -> dict[str, str]:
+    tags = {"bae6-task-type": task_type, "bae6-domain": domain, "bae6-run-id": run_id}
+    return {name: value for name, value in tags.items() if value is not None}
+
+
+def _range(start: datetime | None, end: datetime | None) -> dict[str, str]:
+    params = {}
+    for key, value in (("from", start), ("to", end)):
+        if value is None:
+            continue
+        if value.utcoffset() is None:
+            raise ValueError(f"{key} must be a timezone-aware datetime")
+        params[key] = value.isoformat()
+    return params
+
+
+def _headers(
+    end_user_token: str | None,
+    idempotency_key: str | None,
+    tags: dict[str, str] | None = None,
+) -> dict[str, str]:
+    headers = dict(tags or {})
     if end_user_token:
         headers["bae6-end-user-token"] = end_user_token
     if idempotency_key:
@@ -552,7 +789,9 @@ def _headers(end_user_token: str | None, idempotency_key: str | None) -> dict[st
 def _transport(e: httpx.HTTPError) -> AiTransportError:
     # Raised `from None`: the cause can quote a header value, i.e. a token.
     if isinstance(e, httpx.TimeoutException):
-        return AiTimeoutError(f"the gateway did not answer in time ({type(e).__name__})")
+        return AiTimeoutError(
+            f"the gateway did not answer in time ({type(e).__name__})"
+        )
     return AiTransportError(f"could not reach the gateway ({type(e).__name__})")
 
 
