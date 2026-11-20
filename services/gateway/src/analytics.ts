@@ -29,8 +29,8 @@ const GROUPS = {
 export type Measure = keyof typeof MEASURES;
 // Fixed strings, never user input: they are spliced into SQL.
 const MEASURES = {
-  tokens: "(input_tokens + output_tokens)::numeric",
-  cost: "cost",
+  tokens: "(coalesce(input_tokens, 0) + coalesce(output_tokens, 0))::numeric",
+  cost: "coalesce(cost, 0)",
 } as const;
 
 /** The measure a distribution is over; throws 400 for anything else. */
@@ -305,15 +305,15 @@ export function createAnalytics(pool: pg.Pool) {
         share: number;
       }>(
         `WITH u AS (
-           SELECT subject_id, sum(${MEASURES[measure]}) AS v
+           SELECT organization_id, application_id, subject_id, sum(${MEASURES[measure]}) AS v
            FROM usage_events
            WHERE time >= $1::timestamptz AND time < $2::timestamptz AND end_user
              ${extra.join(" ")}
-           GROUP BY subject_id
+           GROUP BY organization_id, application_id, subject_id
          ), r AS (
            SELECT row_number() OVER w AS rn, sum(v) OVER w AS cum,
                   count(*) OVER () AS n, sum(v) OVER () AS total
-           FROM u WINDOW w AS (ORDER BY v DESC, subject_id)
+           FROM u WINDOW w AS (ORDER BY v DESC, organization_id, application_id, subject_id)
          )
          SELECT p, r.n::int AS n, r.total::text AS total,
                 coalesce(r.cum / nullif(r.total, 0), 0)::float8 AS share
@@ -348,18 +348,19 @@ export function createAnalytics(pool: pg.Pool) {
         top20: number;
       }>(
         `WITH u AS (
-           SELECT date_trunc('month', time AT TIME ZONE 'UTC')::date AS month, subject_id,
+           SELECT date_trunc('month', time AT TIME ZONE 'UTC')::date AS month,
+                  organization_id, application_id, subject_id,
                   sum(${MEASURES[measure]}) AS v
            FROM usage_events
            WHERE time >= $1::timestamptz AND time < $2::timestamptz AND end_user
              ${extra.join(" ")}
-           GROUP BY 1, 2
+           GROUP BY 1, 2, 3, 4
          ), r AS (
            SELECT month, row_number() OVER w AS rn, sum(v) OVER w AS cum,
                   count(*) OVER d AS n, sum(v) OVER d AS total
            FROM u
            WINDOW d AS (PARTITION BY month),
-                  w AS (PARTITION BY month ORDER BY v DESC, subject_id)
+                  w AS (PARTITION BY month ORDER BY v DESC, organization_id, application_id, subject_id)
          )
          SELECT to_char(month, 'YYYY-MM') AS month, max(n)::int AS users,
            ${[5, 10, 20]

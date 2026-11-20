@@ -380,7 +380,7 @@ paths:
             default: tokens
       responses:
         "200":
-          description: The daily concentration.
+          description: The monthly concentration.
           content:
             application/json:
               schema:
@@ -1085,7 +1085,7 @@ components:
         measure: { enum: [tokens, cost] }
         data:
           type: array
-          maxItems: 4
+          maxItems: 5
           items:
             type: object
             required: [month, users, top5, top10, top20]

@@ -51,6 +51,8 @@ interface Event {
   latencyMs?: number | null;
   firstTokenMs?: number | null;
   model?: string;
+  application?: string;
+  unmetered?: boolean;
 }
 
 const insert = (e: Event) =>
@@ -58,7 +60,7 @@ const insert = (e: Event) =>
     `INSERT INTO usage_events (request_id, organization_id, application_id, subject_id,
        provider, model_id, price_book_version, input_tokens, output_tokens, cost, outcome,
        task_type, run_id, end_user, latency_ms, first_token_ms, time)
-     VALUES ($1, $2, 'app', $3, 'bedrock', $4, 'test-v1', 10, 5, $5, 'measured',
+     VALUES ($1, $2, $12, $3, 'bedrock', $4, 'test-v1', $13::int, $13::int / 2, $5, 'measured',
        $6, $7, $8, $9, $10, $11)`,
     [
       `led_${randomUUID()}`,
@@ -72,6 +74,8 @@ const insert = (e: Event) =>
       e.latencyMs ?? null,
       e.firstTokenMs ?? null,
       e.time,
+      e.application ?? "app",
+      e.unmetered ? null : 10,
     ],
   );
 
@@ -586,6 +590,52 @@ test(
     );
     assert.equal(Number(d.total), 60);
     assert.equal(share(d, 50), 0.75);
+  },
+);
+
+test(
+  "distribution ranks users with no reported tokens last",
+  { skip },
+  async () => {
+    const o = org();
+    await insert({ organization: o, time: T, subject: "heavy", endUser: true });
+    for (const subject of ["x", "y"]) {
+      await insert({
+        organization: o,
+        time: T,
+        subject,
+        endUser: true,
+        unmetered: true,
+      });
+    }
+    const d = await analytics.distribution(
+      query({ groupBy: null, organization: o }),
+      "tokens",
+    );
+    assert.equal(d.users, 3);
+    assert.equal(share(d, 34), 1);
+  },
+);
+
+test(
+  "distribution keeps the same subject id in two applications apart",
+  { skip },
+  async () => {
+    const o = org();
+    for (const application of ["one", "two"]) {
+      await insert({
+        organization: o,
+        time: T,
+        subject: "u",
+        endUser: true,
+        application,
+      });
+    }
+    const d = await analytics.distribution(
+      query({ groupBy: null, organization: o }),
+      "tokens",
+    );
+    assert.equal(d.users, 2);
   },
 );
 
