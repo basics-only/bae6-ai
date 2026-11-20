@@ -4,6 +4,8 @@ export interface GatewayModelOptions {
   baseUrl: string;
   token: () => Promise<string>;
   model: string;
+  /** Sent as Bae6-Run-Id so the run's spend can be read from the gateway. */
+  runId: string;
   maxOutputTokens: number;
   requestTimeoutMs: number;
 }
@@ -66,6 +68,7 @@ export function gatewayModel(o: GatewayModelOptions): AgentModel {
         headers: {
           authorization: `Bearer ${await o.token()}`,
           "content-type": "application/json",
+          "bae6-run-id": o.runId,
         },
         body: JSON.stringify({
           model: o.model,

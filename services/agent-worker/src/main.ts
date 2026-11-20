@@ -93,6 +93,7 @@ const runner = createRunner({
         baseUrl: gatewayUrl,
         token: async () => (await readFile(tokenFile, "utf8")).trim(),
         model: run.model,
+        runId: `run_${run.id}`,
         maxOutputTokens,
         requestTimeoutMs: modelTimeoutMs,
       }),

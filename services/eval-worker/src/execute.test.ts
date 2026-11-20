@@ -6,8 +6,12 @@ import { createExecutor } from "./execute.js";
 import type { Claimed } from "./store.js";
 
 let answer: (input: string) => { status: number; content?: unknown };
-const seen: { auth: string | undefined; model: string; maxTokens: number }[] =
-  [];
+const seen: {
+  auth: string | undefined;
+  runId: string | undefined;
+  model: string;
+  maxTokens: number;
+}[] = [];
 const gateway = createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => {
@@ -17,6 +21,7 @@ const gateway = createServer((req, res) => {
     const body = JSON.parse(raw);
     seen.push({
       auth: req.headers.authorization,
+      runId: req.headers["bae6-run-id"] as string | undefined,
       model: body.model,
       maxTokens: body.max_tokens,
     });
@@ -82,6 +87,7 @@ test("cases are sent to the gateway with the worker credential and scored", asyn
     seen.every(
       (s) =>
         s.auth === "Bearer worker-token" &&
+        s.runId === "eval_00000000-0000-0000-0000-000000000000" &&
         s.model === "m1" &&
         s.maxTokens === 64,
     ),

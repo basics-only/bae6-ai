@@ -25,6 +25,7 @@ async function complete(
   model: string,
   input: string,
   signal: AbortSignal,
+  runId: string,
 ): Promise<string> {
   const res = await fetch(`${o.baseUrl}/v1/chat/completions`, {
     method: "POST",
@@ -32,6 +33,7 @@ async function complete(
     headers: {
       authorization: `Bearer ${await o.token()}`,
       "content-type": "application/json",
+      "bae6-run-id": runId,
     },
     body: JSON.stringify({
       model,
@@ -63,7 +65,13 @@ export function createExecutor(o: ExecuteOptions) {
           cases: run.cases,
         },
         task: async (input, ctx) => ({
-          output: await complete(o, run.model, input, ctx.signal),
+          output: await complete(
+            o,
+            run.model,
+            input,
+            ctx.signal,
+            `eval_${run.id}`,
+          ),
         }),
         scorers: run.scorers.map(scorerFor),
         seed: 0,
