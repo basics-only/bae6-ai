@@ -1,0 +1,304 @@
+openapi: 3.1.0
+info:
+  title: bae6-ai agent-worker API
+  version: 1.0.0
+  summary: Bounded, queued agent runs for one tenant.
+  description: |
+    A run is queued, executed by a worker replica, and recorded with a receipt for every
+    tool call. Poll `GET /v1/agent-runs/{id}`; there is no callback.
+
+    **Identity and tenancy.** As for the gateway: the workload's bearer token identifies it,
+    and the organization and application come from the issuer configuration. A deployment
+    serves one organization; it starts only if every issuer maps to the same one. A run of
+    another organization is `404 not_found`.
+
+    **Scopes.** `agent-runs:write` submits and cancels; `agent-runs:read` reads and lists.
+
+    **Bounds.** Limits in a request may only lower the deployment's ceilings; a value above
+    a ceiling is `400 invalid_request`, never clamped. The queue holds at most a configured
+    number of unfinished runs per organization; beyond it a submit is `429`.
+
+    **Delivery.** A run executes a bounded number of times. A run whose worker died is retried
+    from the start, and after the last attempt finishes with `stop: abandoned`. Tools must
+    tolerate being called again.
+
+    **Untrusted text.** `task`, `text` and every receipt `detail` are caller or tool
+    controlled. Receipts never contain the input of a call the tool refused.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: http://localhost:8081
+    description: Local development
+security:
+  - bearer: []
+paths:
+  /health/live:
+    $ref: "./vendor/openapi/common.yaml#/paths/~1health~1live"
+  /health/ready:
+    $ref: "./vendor/openapi/common.yaml#/paths/~1health~1ready"
+  /v1/agent-runs:
+    post:
+      operationId: createAgentRun
+      summary: Queue a run. Needs `agent-runs:write`.
+      description: |
+        With an `Idempotency-Key`, a repeat of the same body returns the original run
+        with `Idempotent-Replayed: true`; the same key with another body is
+        `409 idempotency_key_reused`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAgentRun"
+      responses:
+        "200":
+          description: Replay of an earlier request with the same `Idempotency-Key`.
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, enum: ["true"] }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
+        "202":
+          description: Queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
+        "400":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/RateLimited"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+    get:
+      operationId: listAgentRuns
+      summary: The organization's runs, newest first. Needs `agent-runs:read`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/RunStatus" }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          description: The `nextCursor` of the previous page.
+          schema: { type: string, pattern: "^[0-9]{1,15}$" }
+      responses:
+        "200":
+          description: One page. Receipts are omitted; read a run for them.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRunList"
+        "400":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/agent-runs/{id}:
+    get:
+      operationId: getAgentRun
+      summary: One run with its receipts. Needs `agent-runs:read`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: The run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/NotFound"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/agent-runs/{id}/cancel:
+    post:
+      operationId: cancelAgentRun
+      summary: Cancel a run. Needs `agent-runs:write`.
+      description: |
+        A queued run becomes `cancelled` at once. A running run is told to stop and becomes
+        `finished` with `stop: aborted` when its worker notices, normally within seconds.
+        Cancelling a finished run changes nothing and returns it.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: The run after the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/NotFound"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+components:
+  securitySchemes:
+    bearer:
+      $ref: "./vendor/openapi/common.yaml#/components/securitySchemes/bearer"
+  parameters:
+    EndUserToken:
+      name: Bae6-End-User-Token
+      in: header
+      description: Optional verified user token; the user becomes the run's submitter.
+      schema:
+        type: string
+        maxLength: 8192
+    RunId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^run_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+  responses:
+    IdempotencyConflict:
+      description: |
+        `idempotency_key_reused`: the key was used for a different body.
+      content:
+        application/json:
+          schema:
+            $ref: "./vendor/schemas/error-envelope.json"
+  schemas:
+    RunStatus:
+      enum: [queued, running, finished, cancelled]
+    StopReason:
+      description: |
+        `final` is the only success. `abandoned` means every attempt's worker died before
+        finishing; the others are the agent's own bounds.
+      enum:
+        - final
+        - max_steps
+        - token_budget
+        - history_limit
+        - timeout
+        - aborted
+        - model_error
+        - abandoned
+    RunLimits:
+      type: object
+      additionalProperties: false
+      properties:
+        maxSteps: { type: integer, minimum: 1, maximum: 100 }
+        maxTotalTokens: { type: integer, minimum: 1 }
+        timeoutMs: { type: integer, minimum: 1 }
+        toolTimeoutMs: { type: integer, minimum: 1 }
+        maxToolOutputChars: { type: integer, minimum: 1 }
+        maxHistoryChars: { type: integer, minimum: 1 }
+    CreateAgentRun:
+      type: object
+      required: [task, model]
+      additionalProperties: false
+      properties:
+        task:
+          description: At most 32768 characters.
+          type: string
+          minLength: 1
+          maxLength: 32768
+        model:
+          description: A model id the deployment's gateway serves.
+          type: string
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+        tools:
+          description: |
+            Tools to allow, by name, from the deployment's catalog. Absent or empty means
+            the model answers without tools. A name not in the catalog is `400`.
+          type: array
+          maxItems: 32
+          uniqueItems: true
+          items: { type: string, pattern: "^[A-Za-z0-9_.-]{1,64}$" }
+        limits: { $ref: "#/components/schemas/RunLimits" }
+    Receipt:
+      type: object
+      required: [step, tool, input, outcome, detail, truncated, durationMs]
+      properties:
+        step: { type: integer, minimum: 1 }
+        tool: { type: string }
+        input:
+          description: The call's input, or `[withheld]` when the tool refused it.
+          type: string
+        outcome: { enum: [ok, invalid_input, not_allowed, denied, error] }
+        detail: { type: string }
+        truncated: { type: boolean }
+        durationMs: { type: integer, minimum: 0 }
+    AgentRun:
+      type: object
+      required:
+        - id
+        - status
+        - model
+        - submitterId
+        - attempt
+        - createdAt
+        - startedAt
+        - finishedAt
+        - stop
+        - text
+        - tokens
+        - receipts
+      properties:
+        id:
+          type: string
+          pattern: "^run_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        status: { $ref: "#/components/schemas/RunStatus" }
+        model: { type: string }
+        submitterId: { type: string }
+        attempt: { type: integer, minimum: 0 }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: [string, "null"], format: date-time }
+        finishedAt: { type: [string, "null"], format: date-time }
+        stop:
+          description: Set once `status` is `finished`.
+          oneOf:
+            - { $ref: "#/components/schemas/StopReason" }
+            - { type: "null" }
+        text: { type: [string, "null"] }
+        tokens: { type: integer, minimum: 0 }
+        receipts:
+          description: At most 100, one per tool call. Empty in a list.
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/Receipt" }
+    AgentRunList:
+      type: object
+      required: [data, nextCursor]
+      properties:
+        data:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/AgentRun" }
+        nextCursor: { type: [string, "null"] }
