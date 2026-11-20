@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { parse } from "yaml";
 
 const config = (model: Record<string, unknown> = {}) => ({
   priceBook: {
@@ -88,4 +89,15 @@ test("exits 2 when no file is given", () => {
   const run = check(undefined);
   assert.equal(run.status, 2);
   assert.match(run.stderr, /usage: check-config/);
+});
+
+test("the config shipped in deploy/values.yaml is valid", () => {
+  const values = parse(
+    readFileSync(
+      new URL("../../../deploy/values.yaml", import.meta.url),
+      "utf8",
+    ),
+  ) as { env: { BAE6_AI_CONFIG: string } };
+  const run = check(values.env.BAE6_AI_CONFIG);
+  assert.equal(run.status, 0, run.stderr);
 });
