@@ -6,14 +6,18 @@ import { after, before, test } from "node:test";
 import { type ModelProvider, ProviderError } from "@bae6/ai-core";
 import AjvModule from "ajv/dist/2020.js";
 import { parse } from "yaml";
+import type { Analytics, UsageQuery } from "./analytics.js";
 import type { ModelConfig } from "./config.js";
 import type { Feedback } from "./feedback.js";
 import type { Identity } from "./identity.js";
-import type { Ledger, Outcome } from "./ledger.js";
+import type { Ledger, Outcome, Tags, Timing } from "./ledger.js";
 import { createGateway } from "./server.js";
 
 const finalized: Outcome[] = [];
+const reserved: { tags: Tags; endUser: boolean }[] = [];
+const timings: (Timing | undefined)[] = [];
 const keys: string[] = [];
+const claims = new Map<string, string>();
 let fail: ProviderError | undefined;
 let ledgerDown = false;
 let hold: Promise<void> | undefined;
@@ -21,19 +25,31 @@ let entered = 0;
 let held = 0;
 
 const ledger = {
-  reserve: async () => {
+  reserve: async (i: { tags: Tags; endUser: boolean }) => {
     if (ledgerDown) throw new Error("db down");
+    reserved.push({ tags: i.tags, endUser: i.endUser });
     return "0.01";
   },
-  finalize: async (_: string, o: Outcome) => {
+  finalize: async (_: string, o: Outcome, t?: Timing) => {
     finalized.push(o);
+    timings.push(t);
     return true;
   },
-  claim: async () => ({ state: "new" }),
+  claim: async (_c: unknown, key: string, hash: string) => {
+    const seen = claims.get(key);
+    if (seen === undefined) {
+      claims.set(key, hash);
+      return { state: "new" };
+    }
+    return seen === hash
+      ? { state: "replay", status: 200, body: { replayed: true } }
+      : { state: "mismatch" };
+  },
   complete: async (_: unknown, _k: string, status: number) => {
     keys.push(`complete ${status}`);
   },
-  release: async () => {
+  release: async (_c: unknown, key: string) => {
+    claims.delete(key);
     keys.push("release");
   },
   budget: async () => {
@@ -54,6 +70,50 @@ const ledger = {
     ];
   },
 } as unknown as Ledger;
+
+const measures = {
+  requests: 2,
+  inputTokens: 6,
+  outputTokens: 4,
+  cost: "0.0001",
+  latencyMs: { p50: 120, p95: 300 },
+  firstTokenMs: { p50: null, p95: null },
+  activeUsers: { day: 1, week: 2, month: 3 },
+};
+const asked: UsageQuery[] = [];
+const tagTime = "2026-11-20T00:00:00.000Z";
+let analyticsDown = false;
+const live = <T>(v: T) => {
+  if (analyticsDown) throw new Error("db down");
+  return v;
+};
+let tagLookupMs = 0;
+let summarizationDeleted = false;
+const analytics = {
+  defined: async (_o: string, kind: string, id: string) => {
+    await new Promise((r) => setTimeout(r, tagLookupMs));
+    return live(
+      kind === "task_type" && id === "summarization" && !summarizationDeleted,
+    );
+  },
+  tags: async () =>
+    live([{ id: "summarization", name: "Summarization", updatedAt: tagTime }]),
+  put: async (_o: string, _k: string, id: string, name: string) =>
+    live({ id, name, updatedAt: tagTime }),
+  remove: async (_o: string, _k: string, id: string) =>
+    live(id === "summarization"),
+  summary: async (q: UsageQuery) => {
+    asked.push(q);
+    return live({
+      truncated: false,
+      data: [{ key: "summarization", ...measures }],
+    });
+  },
+  series: async (q: UsageQuery) => {
+    asked.push(q);
+    return live([{ day: "2026-11-19", ...measures }]);
+  },
+} as unknown as Analytics;
 
 const ratable = new Map<string, string>();
 const rated: unknown[] = [];
@@ -174,6 +234,34 @@ const identities: Record<string, Identity> = {
     applicationId: "crm",
     scopes: ["feedback:read"],
   },
+  analyst: {
+    subjectId: "svc",
+    subjectType: "workload",
+    organizationId: "acme",
+    applicationId: "crm",
+    scopes: ["ai:usage:read"],
+  },
+  admin: {
+    subjectId: "svc",
+    subjectType: "workload",
+    organizationId: "acme",
+    applicationId: "crm",
+    scopes: ["ai:usage:read", "ai:usage:admin"],
+  },
+  operator: {
+    subjectId: "svc",
+    subjectType: "workload",
+    organizationId: "acme",
+    applicationId: "crm",
+    scopes: ["ai:usage:read", "ai:usage:platform"],
+  },
+  person: {
+    subjectId: "ada",
+    subjectType: "user",
+    organizationId: "acme",
+    applicationId: "crm",
+    scopes: ["ai:invoke"],
+  },
   nobudget: {
     subjectId: "svc",
     subjectType: "workload",
@@ -191,6 +279,7 @@ const server = createGateway({
   verify: async (t) => (t ? (identities[t] ?? null) : null),
   ledger,
   feedback,
+  analytics,
   models: new Map([
     ["m", { config, provider }],
     [
@@ -337,9 +426,11 @@ test("every documented route is served", async () => {
     ([path, item]) =>
       "$ref" in item
         ? [["GET", path]]
-        : Object.keys(item).map((m) => [m.toUpperCase(), path]),
+        : Object.keys(item)
+            .filter((m) => m !== "parameters")
+            .map((m) => [m.toUpperCase(), path]),
   );
-  assert.equal(routes.length, 10);
+  assert.equal(routes.length, 18);
   for (const [method, path] of routes) {
     const body = method === "POST" ? {} : undefined;
     const res = await call(method as string, path as string, "noscope", body);
@@ -399,6 +490,196 @@ test("budget and usage reads fail closed with 503 when metering is down", async 
     assert.equal(r.status, 503);
     assert.equal(((await r.json()) as { code: string }).code, "unavailable");
   }
+});
+
+const tagged = (token: string, headers: Record<string, string>, body = hi) =>
+  fetch(`${base}/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, ...headers },
+    body: JSON.stringify(body),
+  });
+
+test("a tag the organization has not defined is refused before any spend", async () => {
+  reserved.length = 0;
+  for (const [headers, code] of [
+    [{ "bae6-task-type": "gossip" }, "unknown_tag"],
+    [{ "bae6-domain": "summarization" }, "unknown_tag"],
+    [{ "bae6-task-type": "Bad Tag" }, "invalid_request"],
+    [{ "bae6-run-id": "has space" }, "invalid_request"],
+  ] as const) {
+    const res = await tagged("acme", headers);
+    const body = await res.json();
+    assert.deepEqual(
+      [res.status, body.code],
+      [400, code],
+      JSON.stringify(headers),
+    );
+    conforms("ErrorEnvelope", body);
+  }
+  assert.equal(reserved.length, 0);
+});
+
+const keyed = (key: string, headers: Record<string, string>) =>
+  tagged("acme", { "idempotency-key": key, ...headers });
+
+test("a retry replays after its tag was deleted, and a new key is refused", async () => {
+  const headers = { "bae6-task-type": "summarization" };
+  assert.equal((await keyed("key-tag-001", headers)).status, 200);
+  summarizationDeleted = true;
+  try {
+    const retry = await keyed("key-tag-001", headers);
+    assert.equal(retry.status, 200);
+    assert.equal(retry.headers.get("idempotent-replayed"), "true");
+    const fresh = await keyed("key-tag-002", headers);
+    assert.equal(fresh.status, 400);
+    assert.equal((await fresh.json()).code, "unknown_tag");
+    assert.equal(claims.has("key-tag-002"), false);
+  } finally {
+    summarizationDeleted = false;
+  }
+});
+
+test("a key reused with different tags is a conflict, not a replay", async () => {
+  assert.equal(
+    (await keyed("key-tag-003", { "bae6-task-type": "summarization" })).status,
+    200,
+  );
+  const other = await keyed("key-tag-003", { "bae6-run-id": "run-9" });
+  assert.equal(other.status, 409);
+  assert.equal((await other.json()).code, "idempotency_key_reused");
+});
+
+test("latency leaves out the time spent before the provider call", async () => {
+  timings.length = 0;
+  tagLookupMs = 300;
+  try {
+    const res = await tagged("acme", { "bae6-task-type": "summarization" });
+    assert.equal(res.status, 200);
+  } finally {
+    tagLookupMs = 0;
+  }
+  assert.ok((timings[0]?.latencyMs ?? 1000) < 200);
+});
+
+test("a defined tag and run id reach the ledger with the end-user flag and timing", async () => {
+  reserved.length = 0;
+  timings.length = 0;
+  const headers = { "bae6-task-type": "summarization", "bae6-run-id": "run-1" };
+  assert.equal((await tagged("acme", headers)).status, 200);
+  assert.equal((await tagged("person", {})).status, 200);
+  await (
+    await tagged("acme", headers, { ...hi, stream: true } as never)
+  ).text();
+  assert.deepEqual(reserved[0], {
+    tags: { taskType: "summarization", domain: null, runId: "run-1" },
+    endUser: false,
+  });
+  assert.deepEqual(reserved[1], {
+    tags: { taskType: null, domain: null, runId: null },
+    endUser: true,
+  });
+  const [plain, , streamed] = timings;
+  assert.ok(
+    Number.isInteger(plain?.latencyMs) && (plain?.latencyMs ?? -1) >= 0,
+  );
+  assert.equal(plain?.firstTokenMs, null);
+  assert.ok(Number.isInteger(streamed?.firstTokenMs));
+  assert.ok((streamed?.latencyMs ?? 0) >= (streamed?.firstTokenMs ?? 1));
+});
+
+test("usage summary and series are confined to the caller's organization unless it is a platform operator", async () => {
+  asked.length = 0;
+  const summary = await call(
+    "GET",
+    "/v1/usage/summary?groupBy=taskType",
+    "analyst",
+  );
+  assert.equal(summary.status, 200);
+  conforms("UsageSummary", await summary.json());
+  conforms(
+    "UsageSeries",
+    await (await call("GET", "/v1/usage/series", "analyst")).json(),
+  );
+  assert.deepEqual(
+    asked.map((q) => q.organization),
+    ["acme", "acme"],
+  );
+  for (const path of [
+    "/v1/usage/summary?groupBy=organization",
+    "/v1/usage/summary?groupBy=model&organization=globex",
+    "/v1/usage/series?organization=globex",
+  ]) {
+    assert.equal((await call("GET", path, "analyst")).status, 403, path);
+  }
+  assert.equal(
+    (await call("GET", "/v1/usage/summary?groupBy=model", "noscope")).status,
+    403,
+  );
+  assert.equal((await call("GET", "/v1/usage/summary", "analyst")).status, 400);
+  asked.length = 0;
+  const all = await call(
+    "GET",
+    "/v1/usage/summary?groupBy=organization",
+    "operator",
+  );
+  assert.equal(all.status, 200);
+  assert.equal(asked[0]?.organization, null);
+});
+
+test("task types and domains are readable with usage read and writable only by an admin", async () => {
+  conforms(
+    "TagList",
+    await (await call("GET", "/v1/task-types", "analyst")).json(),
+  );
+  conforms(
+    "TagList",
+    await (await call("GET", "/v1/domains", "analyst")).json(),
+  );
+  assert.equal((await call("GET", "/v1/task-types", "noscope")).status, 403);
+
+  const name = { name: "Summarization" };
+  assert.equal(
+    (await call("PUT", "/v1/task-types/summarization", "analyst", name)).status,
+    403,
+  );
+  const put = await call("PUT", "/v1/domains/legal", "admin", name);
+  assert.equal(put.status, 200);
+  conforms("Tag", await put.json());
+  for (const [id, body] of [
+    ["untagged", name],
+    ["Bad_Id", name],
+    ["legal", {}],
+    ["legal", { name: "" }],
+    ["legal", { name: "x".repeat(65) }],
+    ["legal", { name: "ok", id: "other" }],
+  ] as const) {
+    const res = await call("PUT", `/v1/domains/${id}`, "admin", body);
+    assert.equal(res.status, 400, `${id} ${JSON.stringify(body)}`);
+  }
+
+  assert.equal(
+    (await call("DELETE", "/v1/task-types/summarization", "analyst")).status,
+    403,
+  );
+  assert.equal(
+    (await call("DELETE", "/v1/task-types/summarization", "admin")).status,
+    204,
+  );
+  assert.equal(
+    (await call("DELETE", "/v1/task-types/gossip", "admin")).status,
+    404,
+  );
+});
+
+test("tag and analytics reads fail closed with 503 when their store is down", async () => {
+  analyticsDown = true;
+  const res = [
+    await call("GET", "/v1/task-types", "analyst"),
+    await call("GET", "/v1/usage/summary?groupBy=model", "analyst"),
+    await tagged("acme", { "bae6-task-type": "summarization" }),
+  ];
+  analyticsDown = false;
+  for (const r of res) assert.equal(r.status, 503);
 });
 
 test("one organization at its concurrency limit is refused while others are served", async () => {

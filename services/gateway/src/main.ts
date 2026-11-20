@@ -6,6 +6,7 @@ import {
   vertexProvider,
 } from "@bae6/ai-core";
 import pg from "pg";
+import { createAnalytics } from "./analytics.js";
 import {
   type ModelConfig,
   nonAwsEndpointModels,
@@ -89,6 +90,7 @@ const maxInflightPerOrg = int(
 );
 // Size so pool max x max replicas fits the database's share of connections (ADR-0007).
 const poolMax = int("BAE6_DB_POOL_MAX", 10, 1, 100);
+const analyticsPoolMax = int("BAE6_ANALYTICS_POOL_MAX", 3, 1, 20);
 const shutdownDelayMs = int("BAE6_SHUTDOWN_DELAY_MS", 0, 0, 15_000);
 
 const descriptor = (m: ModelConfig): ModelDescriptor => ({
@@ -158,6 +160,16 @@ const pool = new pg.Pool({
   connectionTimeoutMillis: 5000,
   statement_timeout: 10_000,
 });
+// Apart from the ledger's pool so slow reports cannot starve reserve and finalize.
+const analyticsPool = new pg.Pool({
+  connectionString: databaseUrl,
+  max: analyticsPoolMax,
+  connectionTimeoutMillis: 5000,
+  statement_timeout: 8_000,
+});
+for (const p of [pool, analyticsPool]) {
+  p.on("error", (err) => log({ msg: "pool_error", error: err.name }));
+}
 const client = await pool.connect();
 try {
   await migrate(client);
@@ -169,6 +181,7 @@ const ledger = createLedger(pool, {
 });
 await ledger.publishPrices(config.priceBook.prices);
 const feedback = createFeedback(pool);
+const analytics = createAnalytics(analyticsPool, pool);
 const feedbackRetentionDays = int("BAE6_FEEDBACK_RETENTION_DAYS", 90, 1, 3650);
 
 const server = createGateway({
@@ -176,6 +189,7 @@ const server = createGateway({
   verify: createVerifier(issuers, { allowHttpJwks }),
   ledger,
   feedback,
+  analytics,
   models,
   budgets: config.budgets,
   timeoutMs,
@@ -207,7 +221,9 @@ process.once("SIGTERM", () => {
   setTimeout(() => {
     clearInterval(reconciler);
     server.close(() => {
-      pool.end().finally(() => process.exit(0));
+      Promise.allSettled([pool.end(), analyticsPool.end()]).then(() =>
+        process.exit(0),
+      );
     });
     server.closeIdleConnections();
     // In-flight calls end within timeoutMs; set terminationGracePeriodSeconds above this.
