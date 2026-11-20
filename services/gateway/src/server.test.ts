@@ -393,7 +393,9 @@ test("budget and usage reads fail closed with 503 when metering is down", async 
 
 test("one organization at its concurrency limit is refused while others are served", async () => {
   let release!: () => void;
-  hold = new Promise((r) => (release = r));
+  hold = new Promise((r) => {
+    release = r;
+  });
   entered = 0;
   held = 2;
   const open = { ...hi, model: "open" };

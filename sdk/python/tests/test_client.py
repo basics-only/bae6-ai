@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-
 from bae6_ai import (
     Ai,
     AiApiError,
