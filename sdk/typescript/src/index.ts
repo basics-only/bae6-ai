@@ -11,6 +11,12 @@ export interface CallOptions {
   endUserToken?: string;
   /** Retrying with the same key returns the first answer instead of calling the model again. */
   idempotencyKey?: string;
+  /** An id the organization has defined; the gateway refuses unknown ones. */
+  taskType?: string;
+  /** An id the organization has defined; the gateway refuses unknown ones. */
+  domain?: string;
+  /** Groups calls, so a run's spend can be read with `usageSummary({ groupBy: "run" })`. */
+  runId?: string;
   signal?: AbortSignal;
 }
 
@@ -72,6 +78,52 @@ export interface UsageRow {
   outputTokens: number;
   /** Decimal string in the price book's currency. */
   cost: string;
+}
+
+export type UsageGroupBy =
+  | "organization"
+  | "taskType"
+  | "domain"
+  | "model"
+  | "run";
+
+export interface UsageMeasures {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  /** Decimal string in the price book's currency. */
+  cost: string;
+  latencyMs: { p50: number | null; p95: number | null };
+  firstTokenMs: { p50: number | null; p95: number | null };
+  activeUsers: { day: number; week: number; month: number };
+}
+
+export interface UsageRange {
+  from?: Date;
+  to?: Date;
+}
+
+export interface UsageSummary {
+  from: string;
+  to: string;
+  groupBy: UsageGroupBy;
+  /** True when more than 100 groups matched and the cheapest were dropped. */
+  truncated: boolean;
+  data: ({ key: string } & UsageMeasures)[];
+}
+
+export interface UsageSeries {
+  from: string;
+  to: string;
+  groupBy: UsageGroupBy | null;
+  group: string | null;
+  data: ({ day: string } & UsageMeasures)[];
+}
+
+export interface Tag {
+  id: string;
+  name: string;
+  updatedAt: string;
 }
 
 export interface Budget {
@@ -202,6 +254,13 @@ async function* lines(body: ReadableStream<Uint8Array>, onData: () => void) {
   if (buffered) yield buffered.replace(/\r$/, "");
 }
 
+function range(r: UsageRange) {
+  const q = new URLSearchParams();
+  if (r.from) q.set("from", r.from.toISOString());
+  if (r.to) q.set("to", r.to.toISOString());
+  return q;
+}
+
 export class Ai {
   readonly #baseUrl: string;
   readonly #credentials: string;
@@ -321,6 +380,101 @@ export class Ai {
     return body.data as UsageRow[];
   }
 
+  /**
+   * Spend, tokens, latency and active users per group; needs `ai:usage:read`. Grouping by
+   * "organization", or naming another one, needs `ai:usage:platform`. `runIds` (1 to 50) is
+   * required for "run".
+   */
+  async usageSummary(
+    query: UsageRange & {
+      groupBy: UsageGroupBy;
+      organization?: string;
+      runIds?: string[];
+    },
+    options: CallOptions = {},
+  ): Promise<UsageSummary> {
+    const q = range(query);
+    q.set("groupBy", query.groupBy);
+    if (query.organization) q.set("organization", query.organization);
+    for (const id of query.runIds ?? []) q.append("runId", id);
+    const body = await this.#call("GET", `/v1/usage/summary?${q}`, options);
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as UsageSummary;
+  }
+
+  /** One point per UTC day, for everything or for one `group` of `groupBy`. */
+  async usageSeries(
+    query: UsageRange & {
+      groupBy?: UsageGroupBy;
+      group?: string;
+      organization?: string;
+    } = {},
+    options: CallOptions = {},
+  ): Promise<UsageSeries> {
+    const q = range(query);
+    if (query.groupBy) q.set("groupBy", query.groupBy);
+    if (query.group) q.set("group", query.group);
+    if (query.organization) q.set("organization", query.organization);
+    const body = await this.#call("GET", `/v1/usage/series?${q}`, options);
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as UsageSeries;
+  }
+
+  listTaskTypes(options: CallOptions = {}) {
+    return this.#tags("task-types", options);
+  }
+
+  listDomains(options: CallOptions = {}) {
+    return this.#tags("domains", options);
+  }
+
+  /** Creates or renames a task type; needs `ai:usage:admin`. At most 50 per organization. */
+  putTaskType(id: string, name: string, options: CallOptions = {}) {
+    return this.#putTag("task-types", id, name, options);
+  }
+
+  putDomain(id: string, name: string, options: CallOptions = {}) {
+    return this.#putTag("domains", id, name, options);
+  }
+
+  /** Past usage keeps the id; new calls tagged with it are refused. */
+  async deleteTaskType(id: string, options: CallOptions = {}) {
+    await this.#call(
+      "DELETE",
+      `/v1/task-types/${encodeURIComponent(id)}`,
+      options,
+      undefined,
+      true,
+    );
+  }
+
+  async deleteDomain(id: string, options: CallOptions = {}) {
+    await this.#call(
+      "DELETE",
+      `/v1/domains/${encodeURIComponent(id)}`,
+      options,
+      undefined,
+      true,
+    );
+  }
+
+  async #tags(kind: string, options: CallOptions) {
+    const body = await this.#call("GET", `/v1/${kind}`, options);
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body.data as Tag[];
+  }
+
+  async #putTag(kind: string, id: string, name: string, options: CallOptions) {
+    const body = await this.#call(
+      "PUT",
+      `/v1/${kind}/${encodeURIComponent(id)}`,
+      options,
+      { name },
+    );
+    if (typeof body.id !== "string") throw invalidResponse();
+    return body as unknown as Tag;
+  }
+
   async budget(options: CallOptions = {}): Promise<Budget> {
     const body = await this.#call("GET", "/v1/budgets", options);
     if (typeof body.limit !== "string" || typeof body.spent !== "string") {
@@ -357,9 +511,12 @@ export class Ai {
     path: string,
     options: CallOptions,
     payload?: unknown,
+    emptyOk = false,
   ) {
     const res = await this.#fetch(method, path, options, payload);
-    const parsed = parseJson(await this.#text(res));
+    const text = await this.#text(res);
+    if (emptyOk && res.status === 204) return {};
+    const parsed = parseJson(text);
     if (res.status !== 200) throw httpError(res.status, parsed);
     if (!isObject(parsed)) throw invalidResponse();
     return parsed;
@@ -392,6 +549,9 @@ export class Ai {
           ...(options.idempotencyKey
             ? { "idempotency-key": options.idempotencyKey }
             : {}),
+          ...(options.taskType ? { "bae6-task-type": options.taskType } : {}),
+          ...(options.domain ? { "bae6-domain": options.domain } : {}),
+          ...(options.runId ? { "bae6-run-id": options.runId } : {}),
           ...(payload === undefined
             ? {}
             : { "content-type": "application/json" }),

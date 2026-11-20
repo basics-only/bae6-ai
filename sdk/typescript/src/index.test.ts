@@ -201,3 +201,43 @@ test("submits feedback and pages through the listing", async () => {
   assert.ok(err instanceof AiApiError);
   assert.equal(err.status, 404);
 });
+
+test("sends task type, domain and run id as headers", async () => {
+  reply = json(200, { id: "c", model: "m", choices: [], usage });
+  await ai.chat(req, {
+    taskType: "summarization",
+    domain: "legal",
+    runId: "run-1",
+  });
+  assert.equal(seen["bae6-task-type"], "summarization");
+  assert.equal(seen["bae6-domain"], "legal");
+  assert.equal(seen["bae6-run-id"], "run-1");
+  await ai.chat(req);
+  assert.equal(seen["bae6-task-type"], undefined);
+});
+
+test("usageSummary sends the group, the runs and the range", async () => {
+  reply = json(200, { data: [] });
+  const from = new Date("2026-11-01T00:00:00Z");
+  await ai.usageSummary({ groupBy: "run", from, runIds: ["a", "b"] });
+  const q = new URL(seenUrl.split(" ")[1] ?? "", "http://x").searchParams;
+  assert.equal(q.get("groupBy"), "run");
+  assert.deepEqual(q.getAll("runId"), ["a", "b"]);
+  assert.equal(q.get("from"), from.toISOString());
+});
+
+test("manages task types and domains, treating 204 as success", async () => {
+  reply = json(200, { data: [{ id: "legal" }] });
+  assert.deepEqual(await ai.listDomains(), [{ id: "legal" }]);
+  reply = json(200, { id: "legal", name: "Legal", updatedAt: "t" });
+  assert.equal((await ai.putTaskType("legal", "Legal")).id, "legal");
+  assert.equal(seenUrl, "PUT /v1/task-types/legal");
+  reply = (res) => {
+    res.writeHead(204);
+    res.end();
+  };
+  await ai.deleteDomain("legal");
+  assert.equal(seenUrl, "DELETE /v1/domains/legal");
+  reply = json(404, { code: "not_found", message: "no" });
+  await assert.rejects(ai.deleteDomain("gone"), AiApiError);
+});
