@@ -66,9 +66,14 @@ paths:
         `Idempotency-Key` is not supported with `stream`. A replayed response, success or a
         possibly billed `502`/`504`, carries `Idempotent-Replayed: true`. At most 20 images
         per request. A stream that fails after it started ends with one
-        `data: {"error": ErrorEnvelope}` event and no `[DONE]`.
+        `data: {"error": ErrorEnvelope}` event and no `[DONE]`. The `Bae6-*` tag headers are
+        part of the request: a key reused with different tags is `409 idempotency_key_reused`,
+        and a key already used replays even if its tag has since been deleted.
       parameters:
         - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "#/components/parameters/TaskType"
+        - $ref: "#/components/parameters/Domain"
+        - $ref: "#/components/parameters/RunIdHeader"
         - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
         - $ref: "./vendor/openapi/common.yaml#/components/parameters/IdempotencyKey"
       requestBody:
@@ -118,6 +123,9 @@ paths:
       summary: Embeds 1 to 16 strings. Needs `ai:invoke`.
       parameters:
         - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "#/components/parameters/TaskType"
+        - $ref: "#/components/parameters/Domain"
+        - $ref: "#/components/parameters/RunIdHeader"
         - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
         - $ref: "./vendor/openapi/common.yaml#/components/parameters/IdempotencyKey"
       requestBody:
@@ -178,6 +186,24 @@ paths:
           $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
         "503":
           $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/credentials:
+    get:
+      operationId: getCredentialStatus
+      summary: Where each configured provider's cloud credentials come from, and when they last refreshed. Needs `ai:usage:read`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: One entry per provider the gateway is configured with. Never contains credentials.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialStatusList"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
   /v1/usage:
     get:
       operationId: getUsage
@@ -210,6 +236,330 @@ paths:
           $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
         "403":
           $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/usage/summary:
+    get:
+      operationId: getUsageSummary
+      summary: Usage per group over a window, with latency and active users. Needs `ai:usage:read`.
+      description: |
+        Confined to the caller's organization unless the caller has `ai:usage:platform`, which
+        allows other organizations (`organization`) and all of them at once. `groupBy=organization`
+        needs `ai:usage:platform`, else `403`. Groups are ordered by cost, highest first, and at
+        most 100 are returned; `truncated` says more existed. `groupBy=run` needs 1 to 50 `runId`
+        values and omits runs with no recorded calls.
+
+        Latency is measured over calls that have a recorded latency. `activeUsers` counts distinct
+        end users over the trailing 1, 7 and 30 days ending at `to`; calls made with only a service
+        token have no end user and are not counted. Calls without a tag are the group `untagged`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/UsageFrom"
+        - $ref: "#/components/parameters/UsageTo"
+        - $ref: "#/components/parameters/UsageOrganization"
+        - name: groupBy
+          in: query
+          required: true
+          schema:
+            enum: [organization, taskType, domain, model, run]
+        - name: runId
+          in: query
+          description: Required with `groupBy=run`, else not allowed.
+          style: form
+          explode: true
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 50
+            items:
+              $ref: "#/components/schemas/RunId"
+      responses:
+        "200":
+          description: The groups.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageSummary"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/usage/series:
+    get:
+      operationId: getUsageSeries
+      summary: Usage per UTC day, for everything or for one group. Needs `ai:usage:read`.
+      description: |
+        The same measures and scope rules as `/v1/usage/summary`, one point per UTC day in
+        the window, oldest first, at most 94; a day without calls reports zeros. A partial first or last day covers only the part
+        inside `[from, to)`. `activeUsers` on a day count the trailing 1, 7 and 30 days ending
+        at the end of that day (or at `to`, if sooner). With neither `groupBy` nor `group` the
+        series covers everything in scope; giving one without the other is `400`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/UsageFrom"
+        - $ref: "#/components/parameters/UsageTo"
+        - $ref: "#/components/parameters/UsageOrganization"
+        - name: groupBy
+          in: query
+          schema:
+            enum: [organization, taskType, domain, model, run]
+        - name: group
+          in: query
+          description: The `key` of one group from the summary. `untagged` selects calls without a tag.
+          schema: { type: string, minLength: 1, maxLength: 128 }
+      responses:
+        "200":
+          description: The days.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageSeries"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/usage/distribution:
+    get:
+      operationId: getUsageDistribution
+      summary: How concentrated usage is across end users. Needs `ai:usage:read`.
+      description: |
+        For each whole percent from 1 to 100, the share of `measure` used by that top
+        percent of end users, so `{ topUsersPercent: 10, share: 0.85 }` means the top 10% of
+        users used 85%. Only calls made for an end user count. Carries no user ids. `groupBy`
+        and `group` narrow it as in `/v1/usage/series`; scope rules are those of
+        `/v1/usage/summary`. With no end users `users` is 0 and `data` is empty; when the end users used none of
+        the measure, `users` is their count, `total` is `"0"` and `data` is empty.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/UsageFrom"
+        - $ref: "#/components/parameters/UsageTo"
+        - $ref: "#/components/parameters/UsageOrganization"
+        - name: groupBy
+          in: query
+          schema:
+            enum: [organization, taskType, domain, model, run]
+        - name: group
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 128 }
+        - name: measure
+          in: query
+          schema:
+            enum: [tokens, cost]
+            default: tokens
+      responses:
+        "200":
+          description: The distribution.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageDistribution"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/usage/concentration:
+    get:
+      operationId: getUsageConcentration
+      summary: How concentrated usage is across end users, month by month. Needs `ai:usage:read`.
+      description: |
+        For each UTC calendar month with end-user calls, the share of `measure` used by that
+        month's top 5%, 10% and 20% of end users. The first and last month cover only the part
+        inside the window. Parameters, scope rules and privacy are those of
+        `/v1/usage/distribution`. Months where end users used none of the measure are left out.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/UsageFrom"
+        - $ref: "#/components/parameters/UsageTo"
+        - $ref: "#/components/parameters/UsageOrganization"
+        - name: groupBy
+          in: query
+          schema:
+            enum: [organization, taskType, domain, model, run]
+        - name: group
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 128 }
+        - name: measure
+          in: query
+          schema:
+            enum: [tokens, cost]
+            default: tokens
+      responses:
+        "200":
+          description: The monthly concentration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageConcentration"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/task-types:
+    get:
+      operationId: listTaskTypes
+      summary: The organization's task types. Needs `ai:usage:read`.
+      description: At most 50. Calls name one in `Bae6-Task-Type`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: The task types, ordered by `id`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TagList"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/task-types/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TagId"
+    put:
+      operationId: putTaskType
+      summary: Create a task type, or rename one. Needs `ai:usage:admin`.
+      description: |
+        `untagged` is reserved. An organization has at most 50 task types; a new one past that
+        is `409 tag_limit`. Past calls keep the id they were made with.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TagInput"
+      responses:
+        "200":
+          description: The stored task type.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/TagLimit"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+    delete:
+      operationId: deleteTaskType
+      summary: Remove a task type. Needs `ai:usage:admin`.
+      description: New calls naming it are `400 unknown_tag`; past calls keep it.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+      responses:
+        "204":
+          description: Removed.
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/NotFound"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/domains:
+    get:
+      operationId: listDomains
+      summary: The organization's domains of use. Needs `ai:usage:read`.
+      description: At most 50. Calls name one in `Bae6-Domain`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: The domains, ordered by `id`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TagList"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/domains/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TagId"
+    put:
+      operationId: putDomain
+      summary: Create a domain, or rename one. Needs `ai:usage:admin`.
+      description: |
+        `untagged` is reserved. An organization has at most 50 domains; a new one past that
+        is `409 tag_limit`. Past calls keep the id they were made with.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TagInput"
+      responses:
+        "200":
+          description: The stored domain.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/TagLimit"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+    delete:
+      operationId: deleteDomain
+      summary: Remove a domain. Needs `ai:usage:admin`.
+      description: New calls naming it are `400 unknown_tag`; past calls keep it.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+      responses:
+        "204":
+          description: Removed.
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/NotFound"
         "503":
           $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
   /v1/feedback:
@@ -295,6 +645,58 @@ components:
       schema:
         type: string
         maxLength: 8192
+    TaskType:
+      name: Bae6-Task-Type
+      in: header
+      description: |
+        What the call is for. Must be the `id` of one of the organization's task types, else
+        `400 unknown_tag` before any provider call. Absent means `untagged`.
+      schema:
+        $ref: "#/components/schemas/TagId"
+    Domain:
+      name: Bae6-Domain
+      in: header
+      description: |
+        The domain of use. Must be the `id` of one of the organization's domains, else
+        `400 unknown_tag` before any provider call. Absent means `untagged`.
+      schema:
+        $ref: "#/components/schemas/TagId"
+    RunIdHeader:
+      name: Bae6-Run-Id
+      in: header
+      description: |
+        Groups the call under an agent or eval run, so the run's spend can be summed. A label
+        the caller chooses, not proof the run exists; it only attributes within the caller's
+        organization.
+      schema:
+        $ref: "#/components/schemas/RunId"
+    TagId:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/TagId"
+    UsageFrom:
+      name: from
+      in: query
+      description: Inclusive. Defaults to the start of the current UTC month.
+      schema:
+        type: string
+        format: date-time
+    UsageTo:
+      name: to
+      in: query
+      description: Exclusive. Defaults to now. Not before `from`, and at most 93 days after it.
+      schema:
+        type: string
+        format: date-time
+    UsageOrganization:
+      name: organization
+      in: query
+      description: |
+        Limits the query to one organization. Other than the caller's own, needs
+        `ai:usage:platform`, else `403`.
+      schema: { type: string, minLength: 1, maxLength: 128 }
   headers:
     IdempotentReplayed:
       description: "`true` when this is the stored answer to an earlier request with the same key."
@@ -306,7 +708,14 @@ components:
       description: |
         Not retryable. Codes: `invalid_request`, `unsupported_parameter`,
         `unsupported_operation`, `unsupported_modality`, `context_too_large`,
-        `provider_rejected`.
+        `no_eligible_model` (a route has no model that fits the request),
+        `provider_rejected`, `unknown_tag`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    TagLimit:
+      description: "`tag_limit`: the organization already has 50 of this kind."
       content:
         application/json:
           schema:
@@ -366,12 +775,18 @@ components:
           type: array
           items:
             type: object
-            required: [id, object, owned_by, capabilities]
+            required: [id, object, capabilities]
             properties:
               id: { type: string }
-              object: { const: model }
+              object:
+                description: >-
+                  `model`, or `route` (ADR 0014): an id that resolves to one of several
+                  models per request. Clients ignore kinds they do not know.
+                enum: [model, route]
               owned_by:
-                description: Unknown values may appear in later versions; clients tolerate them.
+                description: >-
+                  Present for a `model`; a `route` has no single provider. Unknown values may
+                  appear in later versions; clients tolerate them.
                 enum: [bedrock, vertex, huggingface]
               capabilities:
                 $ref: "./vendor/schemas/capability-descriptor.json"
@@ -542,6 +957,24 @@ components:
           description: Held by calls still in flight.
           allOf:
             - $ref: "#/components/schemas/Decimal"
+    CredentialStatusList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            required: [provider, source, lastRefreshAgeSeconds]
+            properties:
+              provider: { enum: [bedrock, vertex] }
+              source:
+                description: Where the credentials come from. `development-static` appears only under `NODE_ENV=development`.
+                enum: [pod-identity, web-identity, metadata, development-static]
+              lastRefreshAgeSeconds:
+                description: Seconds since the last successful refresh; null before the first one, and always null for `development-static`.
+                type: [integer, "null"]
+                minimum: 0
     FeedbackRequest:
       type: object
       required: [requestId, verdict]
@@ -600,3 +1033,161 @@ components:
               inputTokens: { type: integer, minimum: 0 }
               outputTokens: { type: integer, minimum: 0 }
               cost: { $ref: "#/components/schemas/Decimal" }
+    TagId:
+      description: Lowercase letters, digits and hyphens, starting with a letter or digit.
+      type: string
+      pattern: "^[a-z0-9][a-z0-9-]{0,47}$"
+    RunId:
+      type: string
+      pattern: "^[A-Za-z0-9._-]{1,64}$"
+    Tag:
+      type: object
+      required: [id, name, updatedAt]
+      properties:
+        id: { $ref: "#/components/schemas/TagId" }
+        name: { type: string, minLength: 1, maxLength: 64 }
+        updatedAt: { type: string, format: date-time }
+    TagInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 64 }
+    TagList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          maxItems: 50
+          items:
+            $ref: "#/components/schemas/Tag"
+    Percentiles:
+      description: Milliseconds. Null when no call in scope has a recorded value.
+      type: object
+      required: [p50, p95]
+      properties:
+        p50: { type: [number, "null"], minimum: 0 }
+        p95: { type: [number, "null"], minimum: 0 }
+    ActiveUsers:
+      description: Distinct end users over the trailing day, 7 days and 30 days.
+      type: object
+      required: [day, week, month]
+      properties:
+        day: { type: integer, minimum: 0 }
+        week: { type: integer, minimum: 0 }
+        month: { type: integer, minimum: 0 }
+    UsageMeasures:
+      type: object
+      required:
+        [requests, inputTokens, outputTokens, cost, latencyMs, firstTokenMs, activeUsers]
+      properties:
+        requests: { type: integer, minimum: 0 }
+        inputTokens: { type: integer, minimum: 0 }
+        outputTokens: { type: integer, minimum: 0 }
+        cost:
+          description: "`uncertain` calls are charged at their reservation."
+          allOf:
+            - $ref: "#/components/schemas/Decimal"
+        latencyMs:
+          description: Request to last byte.
+          allOf:
+            - $ref: "#/components/schemas/Percentiles"
+        firstTokenMs:
+          description: Request to first token; only streamed calls have one.
+          allOf:
+            - $ref: "#/components/schemas/Percentiles"
+        activeUsers:
+          $ref: "#/components/schemas/ActiveUsers"
+    UsageSummary:
+      type: object
+      required: [from, to, groupBy, truncated, data]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        groupBy: { enum: [organization, taskType, domain, model, run] }
+        truncated:
+          description: True when more than 100 groups existed and the lowest-cost ones are left out.
+          type: boolean
+        data:
+          type: array
+          maxItems: 100
+          items:
+            allOf:
+              - $ref: "#/components/schemas/UsageMeasures"
+              - type: object
+                required: [key]
+                properties:
+                  key:
+                    description: |
+                      A model id, organization id, tag id or run id, or `untagged`.
+                    type: string
+    UsageConcentration:
+      type: object
+      required: [from, to, groupBy, group, measure, data]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        groupBy: { enum: [organization, taskType, domain, model, run, null] }
+        group: { type: [string, "null"] }
+        measure: { enum: [tokens, cost] }
+        data:
+          type: array
+          maxItems: 5
+          items:
+            type: object
+            required: [month, users, top5, top10, top20]
+            properties:
+              month: { type: string, pattern: "^[0-9]{4}-[0-9]{2}$" }
+              users: { type: integer, minimum: 1 }
+              top5: { type: number, minimum: 0, maximum: 1 }
+              top10: { type: number, minimum: 0, maximum: 1 }
+              top20: { type: number, minimum: 0, maximum: 1 }
+    UsageDistribution:
+      type: object
+      required: [from, to, groupBy, group, measure, users, total, data]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        groupBy: { enum: [organization, taskType, domain, model, run, null] }
+        group: { type: [string, "null"] }
+        measure: { enum: [tokens, cost] }
+        users:
+          description: Distinct end users with calls in the window.
+          type: integer
+          minimum: 0
+        total:
+          description: Everything those users used, in tokens or in the price book's currency.
+          allOf:
+            - $ref: "#/components/schemas/Decimal"
+        data:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [topUsersPercent, share]
+            properties:
+              topUsersPercent: { type: integer, minimum: 1, maximum: 100 }
+              share:
+                description: Of the total, used by the top `topUsersPercent` of users; from 0 to 1.
+                type: number
+                minimum: 0
+                maximum: 1
+    UsageSeries:
+      type: object
+      required: [from, to, groupBy, group, data]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        groupBy: { enum: [organization, taskType, domain, model, run, null] }
+        group: { type: [string, "null"] }
+        data:
+          type: array
+          maxItems: 94
+          items:
+            allOf:
+              - $ref: "#/components/schemas/UsageMeasures"
+              - type: object
+                required: [day]
+                properties:
+                  day: { type: string, format: date }

@@ -4,6 +4,10 @@ export interface AiOptions {
   credentials: string;
   /** Total time per request; for a stream, the wait for each chunk. Defaults to 120000. */
   timeoutMs?: number;
+  /** The agent-worker's address; needed only for the agent run methods. */
+  agentRunsUrl?: string;
+  /** The eval-worker's address; needed only for the eval run methods. */
+  evalRunsUrl?: string;
 }
 
 export interface CallOptions {
@@ -11,6 +15,12 @@ export interface CallOptions {
   endUserToken?: string;
   /** Retrying with the same key returns the first answer instead of calling the model again. */
   idempotencyKey?: string;
+  /** An id the organization has defined; the gateway refuses unknown ones. */
+  taskType?: string;
+  /** An id the organization has defined; the gateway refuses unknown ones. */
+  domain?: string;
+  /** Groups calls, so a run's spend can be read with `usageSummary({ groupBy: "run" })`. */
+  runId?: string;
   signal?: AbortSignal;
 }
 
@@ -74,11 +84,93 @@ export interface UsageRow {
   cost: string;
 }
 
+export type UsageGroupBy =
+  | "organization"
+  | "taskType"
+  | "domain"
+  | "model"
+  | "run";
+
+export interface UsageMeasures {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  /** Decimal string in the price book's currency. */
+  cost: string;
+  latencyMs: { p50: number | null; p95: number | null };
+  firstTokenMs: { p50: number | null; p95: number | null };
+  activeUsers: { day: number; week: number; month: number };
+}
+
+export interface UsageRange {
+  from?: Date;
+  to?: Date;
+}
+
+export interface UsageSummary {
+  from: string;
+  to: string;
+  groupBy: UsageGroupBy;
+  /** True when more than 100 groups matched and the cheapest were dropped. */
+  truncated: boolean;
+  data: ({ key: string } & UsageMeasures)[];
+}
+
+export interface UsageSeries {
+  from: string;
+  to: string;
+  groupBy: UsageGroupBy | null;
+  group: string | null;
+  data: ({ day: string } & UsageMeasures)[];
+}
+
+export interface UsageDistribution {
+  from: string;
+  to: string;
+  groupBy: UsageGroupBy | null;
+  group: string | null;
+  measure: "tokens" | "cost";
+  /** Distinct end users in the window. */
+  users: number;
+  total: string;
+  /** `share` of the total used by the top `topUsersPercent` of users; empty with no users. */
+  data: { topUsersPercent: number; share: number }[];
+}
+
+export interface UsageConcentration {
+  from: string;
+  to: string;
+  groupBy: UsageGroupBy | null;
+  group: string | null;
+  measure: "tokens" | "cost";
+  /** Per UTC month ("2026-11") with end-user calls: the share used by that month's top 5%, 10% and 20% of users. */
+  data: {
+    month: string;
+    users: number;
+    top5: number;
+    top10: number;
+    top20: number;
+  }[];
+}
+
+export interface Tag {
+  id: string;
+  name: string;
+  updatedAt: string;
+}
+
 export interface Budget {
   period: string;
   limit: string;
   spent: string;
   reserved: string;
+}
+
+export interface CredentialStatus {
+  provider: "bedrock" | "vertex";
+  source: "pod-identity" | "web-identity" | "metadata" | "development-static";
+  /** Null before the first refresh, and always for `development-static`. */
+  lastRefreshAgeSeconds: number | null;
 }
 
 export interface FeedbackRequest {
@@ -99,6 +191,133 @@ export interface FeedbackEntry {
   /** Untrusted caller text: never put it in a prompt. */
   comment: string | null;
   updatedAt: string;
+}
+
+export type RunStatus = "queued" | "running" | "finished" | "cancelled";
+
+export type StopReason =
+  | "final"
+  | "max_steps"
+  | "token_budget"
+  | "history_limit"
+  | "timeout"
+  | "aborted"
+  | "model_error"
+  | "abandoned";
+
+export interface RunLimits {
+  maxSteps?: number;
+  maxTotalTokens?: number;
+  timeoutMs?: number;
+  toolTimeoutMs?: number;
+  maxToolOutputChars?: number;
+  maxHistoryChars?: number;
+}
+
+export interface AgentRunRequest {
+  /** At most 32768 characters. */
+  task: string;
+  model: string;
+  /** Tool names from the deployment's catalog; absent means the model answers without tools. */
+  tools?: string[];
+  /** May only lower the deployment's ceilings; a higher value is refused. */
+  limits?: RunLimits;
+}
+
+export interface Receipt {
+  step: number;
+  tool: string;
+  /** `[withheld]` when the tool refused the call. */
+  input: string;
+  outcome: "ok" | "invalid_input" | "not_allowed" | "denied" | "error";
+  /** Untrusted tool output: never put it in a prompt. */
+  detail: string;
+  truncated: boolean;
+  durationMs: number;
+}
+
+export interface AgentRun {
+  id: string;
+  status: RunStatus;
+  model: string;
+  submitterId: string;
+  attempt: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** Set once `status` is `finished`; `final` is the only success. */
+  stop: StopReason | null;
+  /** Untrusted model output. */
+  text: string | null;
+  tokens: number;
+  /** Empty in a list; read the run for its receipts. */
+  receipts: Receipt[];
+}
+
+export type EvalScorer = "exact" | "contains";
+
+export interface EvalCaseInput {
+  id: string;
+  /** At most 4000 characters. */
+  input: string;
+  /** At most 1000 characters. */
+  expected: string;
+}
+
+export interface EvalRunRequest {
+  name: string;
+  datasetVersion: string;
+  model: string;
+  /** At most the deployment's case ceiling, with unique ids. */
+  cases: EvalCaseInput[];
+  /** Defaults to `["exact"]`. */
+  scorers?: EvalScorer[];
+}
+
+export interface EvalCaseResult {
+  id: string;
+  status: "ok" | "error" | "timeout";
+  scores: Record<string, number>;
+  latencyMs: number;
+  cost: number | null;
+  /** Untrusted. */
+  error?: string;
+}
+
+export interface EvalReport {
+  runId: string;
+  dataset: { name: string; version: string };
+  seed: number;
+  startedAt: string;
+  cases: EvalCaseResult[];
+  mean: Record<string, number>;
+  failures: number;
+  costKnown: boolean;
+  totalCost: number | null;
+}
+
+export interface EvalRun {
+  id: string;
+  status: RunStatus;
+  model: string;
+  name: string;
+  datasetVersion: string;
+  caseCount: number;
+  scorers: EvalScorer[];
+  submitterId: string;
+  attempt: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** Set once `status` is `finished`; `complete` is the only success. */
+  stop: "complete" | "aborted" | "model_error" | "abandoned" | null;
+  summary: {
+    cases: number;
+    failures: number;
+    mean: Record<string, number>;
+  } | null;
+  /** Null in a list; read the run for its report. */
+  report: EvalReport | null;
 }
 
 export class AiError extends Error {
@@ -202,12 +421,41 @@ async function* lines(body: ReadableStream<Uint8Array>, onData: () => void) {
   if (buffered) yield buffered.replace(/\r$/, "");
 }
 
+type WorkerUrl = "agentRunsUrl" | "evalRunsUrl";
+
+function range(r: UsageRange) {
+  const q = new URLSearchParams();
+  if (r.from) q.set("from", r.from.toISOString());
+  if (r.to) q.set("to", r.to.toISOString());
+  return q;
+}
+
+function narrow(
+  q: URLSearchParams,
+  query: {
+    measure?: string;
+    groupBy?: string;
+    group?: string;
+    organization?: string;
+  },
+) {
+  for (const k of ["measure", "groupBy", "group", "organization"] as const) {
+    const v = query[k];
+    if (v !== undefined) q.set(k, v);
+  }
+}
+
 export class Ai {
   readonly #baseUrl: string;
   readonly #credentials: string;
   readonly #timeoutMs: number;
+  readonly #workerUrls: Record<WorkerUrl, string | undefined>;
 
   constructor(options: AiOptions) {
+    this.#workerUrls = {
+      agentRunsUrl: options.agentRunsUrl?.replace(/\/+$/, ""),
+      evalRunsUrl: options.evalRunsUrl?.replace(/\/+$/, ""),
+    };
     this.#baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.#credentials = options.credentials;
     this.#timeoutMs = options.timeoutMs ?? 120_000;
@@ -305,7 +553,14 @@ export class Ai {
   async models(options: CallOptions = {}) {
     const body = await this.#call("GET", "/v1/models", options);
     if (!Array.isArray(body.data)) throw invalidResponse();
-    return body.data as { id: string; owned_by: string; capabilities: Json }[];
+    return body.data as {
+      id: string;
+      /** `model`, `route`, or a kind added later; skip what you do not know. */
+      object: string;
+      /** Absent on a route, which has no single provider. */
+      owned_by?: string;
+      capabilities: Json;
+    }[];
   }
 
   /** Usage of this application, by model and outcome, in [from, to) (at most 93 days). */
@@ -321,12 +576,156 @@ export class Ai {
     return body.data as UsageRow[];
   }
 
+  /**
+   * Spend, tokens, latency and active users per group; needs `ai:usage:read`. Grouping by
+   * "organization", or naming another one, needs `ai:usage:platform`. `runIds` (1 to 50) is
+   * required for "run".
+   */
+  async usageSummary(
+    query: UsageRange & {
+      groupBy: UsageGroupBy;
+      organization?: string;
+      runIds?: string[];
+    },
+    options: CallOptions = {},
+  ): Promise<UsageSummary> {
+    const q = range(query);
+    q.set("groupBy", query.groupBy);
+    if (query.organization) q.set("organization", query.organization);
+    for (const id of query.runIds ?? []) q.append("runId", id);
+    const body = await this.#call("GET", `/v1/usage/summary?${q}`, options);
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as UsageSummary;
+  }
+
+  /** One point per UTC day, for everything or for one `group` of `groupBy`. */
+  async usageSeries(
+    query: UsageRange & {
+      groupBy?: UsageGroupBy;
+      group?: string;
+      organization?: string;
+    } = {},
+    options: CallOptions = {},
+  ): Promise<UsageSeries> {
+    const q = range(query);
+    narrow(q, query);
+    const body = await this.#call("GET", `/v1/usage/series?${q}`, options);
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as UsageSeries;
+  }
+
+  /** How concentrated usage is across end users; carries no user ids. */
+  async usageDistribution(
+    query: UsageRange & {
+      measure?: "tokens" | "cost";
+      groupBy?: UsageGroupBy;
+      group?: string;
+      organization?: string;
+    } = {},
+    options: CallOptions = {},
+  ): Promise<UsageDistribution> {
+    const q = range(query);
+    narrow(q, query);
+    const body = await this.#call(
+      "GET",
+      `/v1/usage/distribution?${q}`,
+      options,
+    );
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as UsageDistribution;
+  }
+
+  /** How the top users' share of usage moves month by month; carries no user ids. */
+  async usageConcentration(
+    query: UsageRange & {
+      measure?: "tokens" | "cost";
+      groupBy?: UsageGroupBy;
+      group?: string;
+      organization?: string;
+    } = {},
+    options: CallOptions = {},
+  ): Promise<UsageConcentration> {
+    const q = range(query);
+    narrow(q, query);
+    const body = await this.#call(
+      "GET",
+      `/v1/usage/concentration?${q}`,
+      options,
+    );
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as UsageConcentration;
+  }
+
+  listTaskTypes(options: CallOptions = {}) {
+    return this.#tags("task-types", options);
+  }
+
+  listDomains(options: CallOptions = {}) {
+    return this.#tags("domains", options);
+  }
+
+  /** Creates or renames a task type; needs `ai:usage:admin`. At most 50 per organization. */
+  putTaskType(id: string, name: string, options: CallOptions = {}) {
+    return this.#putTag("task-types", id, name, options);
+  }
+
+  putDomain(id: string, name: string, options: CallOptions = {}) {
+    return this.#putTag("domains", id, name, options);
+  }
+
+  /** Past usage keeps the id; new calls tagged with it are refused. */
+  async deleteTaskType(id: string, options: CallOptions = {}) {
+    await this.#call(
+      "DELETE",
+      `/v1/task-types/${encodeURIComponent(id)}`,
+      options,
+      undefined,
+      undefined,
+      true,
+    );
+  }
+
+  async deleteDomain(id: string, options: CallOptions = {}) {
+    await this.#call(
+      "DELETE",
+      `/v1/domains/${encodeURIComponent(id)}`,
+      options,
+      undefined,
+      undefined,
+      true,
+    );
+  }
+
+  async #tags(kind: string, options: CallOptions) {
+    const body = await this.#call("GET", `/v1/${kind}`, options);
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body.data as Tag[];
+  }
+
+  async #putTag(kind: string, id: string, name: string, options: CallOptions) {
+    const body = await this.#call(
+      "PUT",
+      `/v1/${kind}/${encodeURIComponent(id)}`,
+      options,
+      { name },
+    );
+    if (typeof body.id !== "string") throw invalidResponse();
+    return body as unknown as Tag;
+  }
+
   async budget(options: CallOptions = {}): Promise<Budget> {
     const body = await this.#call("GET", "/v1/budgets", options);
     if (typeof body.limit !== "string" || typeof body.spent !== "string") {
       throw invalidResponse();
     }
     return body as unknown as Budget;
+  }
+
+  /** Where each configured provider's cloud credentials come from, never the credentials. Needs `ai:usage:read`. */
+  async credentials(options: CallOptions = {}) {
+    const body = await this.#call("GET", "/v1/credentials", options);
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body.data as CredentialStatus[];
   }
 
   /** Rates one completion of this organization; rating it again replaces the first. Needs `feedback:write`. */
@@ -352,15 +751,164 @@ export class Ai {
     };
   }
 
+  /** Queues a run (202); a repeat with the same `idempotencyKey` returns the first run. Needs `agent-runs:write`. */
+  async createAgentRun(
+    request: AgentRunRequest,
+    options: CallOptions = {},
+  ): Promise<AgentRun> {
+    return this.#agentRun(
+      await this.#call(
+        "POST",
+        "/v1/agent-runs",
+        options,
+        request,
+        "agentRunsUrl",
+      ),
+    );
+  }
+
+  /** Poll until `status` is `finished` or `cancelled`. Needs `agent-runs:read`. */
+  async getAgentRun(id: string, options: CallOptions = {}): Promise<AgentRun> {
+    return this.#agentRun(
+      await this.#call(
+        "GET",
+        `/v1/agent-runs/${encodeURIComponent(id)}`,
+        options,
+        undefined,
+        "agentRunsUrl",
+      ),
+    );
+  }
+
+  /** One page of the organization's runs, newest first, without receipts. Needs `agent-runs:read`. */
+  async listAgentRuns(
+    page: { status?: RunStatus; limit?: number; cursor?: string } = {},
+    options: CallOptions = {},
+  ) {
+    const q = new URLSearchParams();
+    if (page.status !== undefined) q.set("status", page.status);
+    if (page.limit !== undefined) q.set("limit", String(page.limit));
+    if (page.cursor !== undefined) q.set("cursor", page.cursor);
+    const body = await this.#call(
+      "GET",
+      `/v1/agent-runs?${q}`,
+      options,
+      undefined,
+      "agentRunsUrl",
+    );
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as { data: AgentRun[]; nextCursor: string | null };
+  }
+
+  /** A queued run is cancelled at once; a running one stops within seconds. Needs `agent-runs:write`. */
+  async cancelAgentRun(
+    id: string,
+    options: CallOptions = {},
+  ): Promise<AgentRun> {
+    return this.#agentRun(
+      await this.#call(
+        "POST",
+        `/v1/agent-runs/${encodeURIComponent(id)}/cancel`,
+        options,
+        undefined,
+        "agentRunsUrl",
+      ),
+    );
+  }
+
+  /** Queues an eval run (202); a repeat with the same `idempotencyKey` returns the first run. Needs `eval-runs:write`. */
+  async createEvalRun(
+    request: EvalRunRequest,
+    options: CallOptions = {},
+  ): Promise<EvalRun> {
+    return this.#evalRun(
+      await this.#call(
+        "POST",
+        "/v1/eval-runs",
+        options,
+        request,
+        "evalRunsUrl",
+      ),
+    );
+  }
+
+  /** Poll until `status` is `finished` or `cancelled`. Needs `eval-runs:read`. */
+  async getEvalRun(id: string, options: CallOptions = {}): Promise<EvalRun> {
+    return this.#evalRun(
+      await this.#call(
+        "GET",
+        `/v1/eval-runs/${encodeURIComponent(id)}`,
+        options,
+        undefined,
+        "evalRunsUrl",
+      ),
+    );
+  }
+
+  /** One page of the organization's eval runs, newest first, without reports. Needs `eval-runs:read`. */
+  async listEvalRuns(
+    page: { status?: RunStatus; limit?: number; cursor?: string } = {},
+    options: CallOptions = {},
+  ) {
+    const q = new URLSearchParams();
+    if (page.status !== undefined) q.set("status", page.status);
+    if (page.limit !== undefined) q.set("limit", String(page.limit));
+    if (page.cursor !== undefined) q.set("cursor", page.cursor);
+    const body = await this.#call(
+      "GET",
+      `/v1/eval-runs?${q}`,
+      options,
+      undefined,
+      "evalRunsUrl",
+    );
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as { data: EvalRun[]; nextCursor: string | null };
+  }
+
+  /** A queued run is cancelled at once; a running one stops within seconds. Needs `eval-runs:write`. */
+  async cancelEvalRun(id: string, options: CallOptions = {}): Promise<EvalRun> {
+    return this.#evalRun(
+      await this.#call(
+        "POST",
+        `/v1/eval-runs/${encodeURIComponent(id)}/cancel`,
+        options,
+        undefined,
+        "evalRunsUrl",
+      ),
+    );
+  }
+
+  #agentRun(body: Json): AgentRun {
+    if (typeof body.id !== "string" || !Array.isArray(body.receipts)) {
+      throw invalidResponse();
+    }
+    return body as unknown as AgentRun;
+  }
+
+  #evalRun(body: Json): EvalRun {
+    if (typeof body.id !== "string" || !Array.isArray(body.scorers)) {
+      throw invalidResponse();
+    }
+    return body as unknown as EvalRun;
+  }
+
   async #call(
     method: string,
     path: string,
     options: CallOptions,
     payload?: unknown,
+    worker?: WorkerUrl,
+    emptyOk = false,
   ) {
-    const res = await this.#fetch(method, path, options, payload);
-    const parsed = parseJson(await this.#text(res));
-    if (res.status !== 200) throw httpError(res.status, parsed);
+    const base = worker ? this.#workerUrls[worker] : this.#baseUrl;
+    if (base === undefined) throw new AiError(`${worker} is not configured`);
+    const res = await this.#fetch(method, path, options, payload, base);
+    const text = await this.#text(res);
+    if (emptyOk && res.status === 204) return {};
+    const parsed = parseJson(text);
+    if (res.status !== 200 && !(worker && res.status === 202)) {
+      throw httpError(res.status, parsed);
+    }
     if (!isObject(parsed)) throw invalidResponse();
     return parsed;
   }
@@ -370,6 +918,7 @@ export class Ai {
     path: string,
     options: CallOptions,
     payload?: unknown,
+    base: string = this.#baseUrl,
   ) {
     const streaming = isObject(payload) && payload.stream === true;
     const signals = [
@@ -377,7 +926,7 @@ export class Ai {
       streaming ? undefined : AbortSignal.timeout(this.#timeoutMs),
     ];
     try {
-      return await fetch(this.#baseUrl + path, {
+      return await fetch(base + path, {
         method,
         // Credentials must not follow a redirect to another host.
         redirect: "manual",
@@ -392,6 +941,9 @@ export class Ai {
           ...(options.idempotencyKey
             ? { "idempotency-key": options.idempotencyKey }
             : {}),
+          ...(options.taskType ? { "bae6-task-type": options.taskType } : {}),
+          ...(options.domain ? { "bae6-domain": options.domain } : {}),
+          ...(options.runId ? { "bae6-run-id": options.runId } : {}),
           ...(payload === undefined
             ? {}
             : { "content-type": "application/json" }),

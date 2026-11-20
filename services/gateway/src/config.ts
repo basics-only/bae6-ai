@@ -30,12 +30,29 @@ export interface ModelConfig {
   organizations?: string[];
 }
 
+export interface RouteRule {
+  model: string;
+  minInputTokens?: number;
+  maxInputTokens?: number;
+  images?: boolean;
+}
+
+export interface RouteConfig {
+  id: string;
+  default: string;
+  /** First match wins. */
+  rules: RouteRule[];
+  /** Organizations allowed to use the route; absent means all. */
+  organizations?: string[];
+}
+
 export interface GatewayConfig {
   priceBook: {
     version: string;
     prices: Record<string, { inputPerMTok: string; outputPerMTok: string }>;
   };
   models: ModelConfig[];
+  routes: RouteConfig[];
   /** Monthly spend limits, decimal strings in the price book's currency. */
   budgets: Record<string, string>;
 }
@@ -68,6 +85,18 @@ export function bedrockEndpoint(v: unknown): URL | null {
   } catch {
     return null;
   }
+}
+
+/** Models whose endpoint is not an AWS host; signed requests would send real credentials there. */
+export function nonAwsEndpointModels(config: GatewayConfig): string[] {
+  return config.models
+    .filter(
+      (m) =>
+        m.provider === "bedrock" &&
+        m.endpoint !== undefined &&
+        !new URL(m.endpoint).hostname.endsWith(".amazonaws.com"),
+    )
+    .map((m) => m.id);
 }
 
 /** Validates the whole file up front so a bad config stops start-up, not a request. */
@@ -203,6 +232,8 @@ export function parseConfig(raw: unknown): GatewayConfig {
     return m as unknown as ModelConfig;
   });
 
+  const routes = parseRoutes(c.routes, models, fail);
+
   if (!isObject(c.budgets))
     fail("budgets must map organization to a monthly limit");
   const budgets = c.budgets as Record<string, unknown>;
@@ -211,5 +242,79 @@ export function parseConfig(raw: unknown): GatewayConfig {
       fail(`budget for ${org} must be a decimal string`);
     }
   }
-  return { priceBook, models, budgets: budgets as Record<string, string> };
+  return {
+    priceBook,
+    models,
+    routes,
+    budgets: budgets as Record<string, string>,
+  };
+}
+
+const MAX_ROUTES = 32;
+const MAX_RULES = 16;
+const ROUTE_KEYS = new Set(["id", "default", "rules", "organizations"]);
+const RULE_KEYS = new Set([
+  "model",
+  "minInputTokens",
+  "maxInputTokens",
+  "images",
+]);
+
+function parseRoutes(
+  raw: unknown,
+  models: ModelConfig[],
+  fail: (msg: string) => never,
+): RouteConfig[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_ROUTES) {
+    fail(`routes must be a list of at most ${MAX_ROUTES} routes`);
+  }
+  const byId = new Map(models.map((m) => [m.id, m]));
+  const ids = new Set(byId.keys());
+  return (raw as unknown[]).map((r): RouteConfig => {
+    if (!isObject(r)) return fail("each route must be an object");
+    const id = String(r.id);
+    if (!MODEL_ID.test(id) || ids.has(id))
+      fail(`route id ${id} is invalid or collides with a model or route`);
+    ids.add(id);
+    const bad = (field: string): never => fail(`route ${id}: invalid ${field}`);
+    for (const k of Object.keys(r)) {
+      if (!ROUTE_KEYS.has(k)) bad(k);
+    }
+    const chatModel = (name: unknown, field: string) => {
+      const m = typeof name === "string" ? byId.get(name) : undefined;
+      if (!m?.operations.includes("chat")) bad(field);
+    };
+    chatModel(r.default, "default");
+    if (!Array.isArray(r.rules) || r.rules.length > MAX_RULES) bad("rules");
+    for (const rule of r.rules as unknown[]) {
+      if (!isObject(rule)) return bad("rules");
+      for (const k of Object.keys(rule)) {
+        if (!RULE_KEYS.has(k)) bad(`rules.${k}`);
+      }
+      chatModel(rule.model, "rules.model");
+      for (const f of ["minInputTokens", "maxInputTokens"] as const) {
+        const v = rule[f];
+        if (
+          v !== undefined &&
+          (!Number.isInteger(v) ||
+            (v as number) < 0 ||
+            (v as number) > 2_000_000)
+        )
+          bad(`rules.${f}`);
+      }
+      if (rule.images !== undefined && typeof rule.images !== "boolean")
+        bad("rules.images");
+      const lo = (rule.minInputTokens as number | undefined) ?? 0;
+      const hi = (rule.maxInputTokens as number | undefined) ?? Infinity;
+      if (lo > hi) bad("rules (minInputTokens is above maxInputTokens)");
+    }
+    if (
+      r.organizations !== undefined &&
+      (!Array.isArray(r.organizations) ||
+        !r.organizations.every((o) => typeof o === "string" && SLUG.test(o)))
+    )
+      bad("organizations");
+    return r as unknown as RouteConfig;
+  });
 }

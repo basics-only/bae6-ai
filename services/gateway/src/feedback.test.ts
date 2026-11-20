@@ -6,6 +6,7 @@ import { createFeedback, type Feedback } from "./feedback.js";
 import { createLedger, type Ledger } from "./ledger.js";
 import { migrate } from "./migrate.js";
 
+const untagged = { taskType: null, domain: null, runId: null };
 const url = process.env.BAE6_DATABASE_URL;
 const skip = url ? false : "BAE6_DATABASE_URL not set";
 let pool: pg.Pool;
@@ -42,6 +43,8 @@ async function request(organizationId: string) {
     inputTokens: 10,
     maxOutputTokens: 10,
     leaseMs: 60_000,
+    tags: untagged,
+    endUser: false,
   });
   await ledger.finalize(requestId, { kind: "failed" });
   return requestId;

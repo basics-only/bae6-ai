@@ -79,6 +79,38 @@ test("refuses a Bedrock or Vertex model whose region is missing or not a string"
   }
 });
 
+const withRoutes = (routes: unknown) => ({ ...config({}), routes });
+const route = {
+  id: "auto",
+  default: "m",
+  rules: [{ model: "m", images: true }],
+};
+
+test("accepts a route over configured chat models", () => {
+  assert.equal(parseConfig(withRoutes([route])).routes[0]?.id, "auto");
+  assert.deepEqual(parseConfig(config({})).routes, []);
+});
+
+test("rejects routes that name unknown models, collide with a model, or carry unsupported keys", () => {
+  for (const bad of [
+    { ...route, id: "m" },
+    { ...route, default: "nope" },
+    { ...route, rules: [{ model: "nope" }] },
+    { ...route, rules: [{ model: "m", minInputTokens: 9, maxInputTokens: 1 }] },
+    { ...route, rules: [{ model: "m", when: "always" }] },
+    { ...route, classifier: { model: "m" } },
+    { ...route, organizations: ["Not A Slug!"] },
+  ]) {
+    assert.throws(() => parseConfig(withRoutes([bad])), /route|invalid/);
+  }
+  assert.throws(() => parseConfig(withRoutes([route, route])), /collides/);
+});
+
+test("rejects a route to a model that cannot chat", () => {
+  const embedOnly = { ...config({ operations: ["embed"] }), routes: [route] };
+  assert.throws(() => parseConfig(embedOnly), /invalid default/);
+});
+
 test("accepts a bedrock endpoint that is a bare origin", () => {
   const parsed = parseConfig(config({ endpoint: "http://mock-bedrock:8080" }));
   assert.equal(parsed.models[0]?.endpoint, "http://mock-bedrock:8080");

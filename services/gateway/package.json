@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
+    "check-config": "node dist/check-config.js",
     "typecheck": "tsc --noEmit",
     "test": "tsx --conditions=source --test src/*.test.ts"
   },
