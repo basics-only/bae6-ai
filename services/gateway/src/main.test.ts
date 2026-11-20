@@ -24,11 +24,26 @@ const config = (endpoint?: string) =>
     budgets: {},
   });
 
+function start(env: Record<string, string>) {
+  return spawnSync(
+    process.execPath,
+    ["--import", "tsx", "--conditions=source", "src/main.ts"],
+    {
+      env: {
+        PATH: process.env.PATH ?? "",
+        BAE6_DATABASE_URL: "postgres://x:x@127.0.0.1:1/x",
+        BAE6_AI_ISSUERS: "[]",
+        ...env,
+      },
+      cwd: new URL("..", import.meta.url),
+      encoding: "utf8",
+      timeout: 20_000,
+    },
+  );
+}
+
 function boot(flag: string, nodeEnv: string | undefined) {
   const env: Record<string, string> = {
-    PATH: process.env.PATH ?? "",
-    BAE6_DATABASE_URL: "postgres://x:x@127.0.0.1:1/x",
-    BAE6_AI_ISSUERS: "[]",
     BAE6_AI_CONFIG: config(
       flag === "BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS"
         ? "http://elsewhere:8080"
@@ -37,17 +52,19 @@ function boot(flag: string, nodeEnv: string | undefined) {
     [flag]: "true",
   };
   if (nodeEnv !== undefined) env.NODE_ENV = nodeEnv;
-  return spawnSync(
-    process.execPath,
-    ["--import", "tsx", "--conditions=source", "src/main.ts"],
-    {
-      env,
-      cwd: new URL("..", import.meta.url),
-      encoding: "utf8",
-      timeout: 20_000,
-    },
-  );
+  return start(env);
 }
+
+test("a Vertex-only config starts in production without any AWS settings", () => {
+  const vertex = JSON.parse(config());
+  vertex.models[0].provider = "vertex";
+  vertex.models[0].project = "bae6-test";
+  const run = start({
+    NODE_ENV: "production",
+    BAE6_AI_CONFIG: JSON.stringify(vertex),
+  });
+  assert.match(run.stderr, /ECONNREFUSED/);
+});
 
 for (const flag of [
   "BAE6_ALLOW_HTTP_JWKS",
