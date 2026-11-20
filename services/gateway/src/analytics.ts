@@ -26,6 +26,24 @@ const GROUPS = {
   run: "run_id",
 } as const;
 
+export type Measure = keyof typeof MEASURES;
+// Fixed strings, never user input: they are spliced into SQL.
+const MEASURES = {
+  tokens: "(input_tokens + output_tokens)::numeric",
+  cost: "cost",
+} as const;
+
+/** The measure a distribution is over; throws 400 for anything else. */
+export function parseMeasure(url: URL): Measure {
+  const m = url.searchParams.get("measure") ?? "tokens";
+  if (!Object.hasOwn(MEASURES, m)) {
+    throw invalid(
+      `measure must be one of ${Object.keys(MEASURES).join(", ")}.`,
+    );
+  }
+  return m as Measure;
+}
+
 export interface UsageQuery {
   from: Date;
   to: Date;
@@ -262,6 +280,52 @@ export function createAnalytics(pool: pg.Pool) {
         data: rows
           .slice(0, MAX_GROUPS)
           .map((r) => ({ key: r.key, ...measures(r) })),
+      };
+    },
+
+    /**
+     * How concentrated the measure is across end users: for each 1 to 100, the share used
+     * by the top that-many percent of them. Carries no user ids.
+     */
+    async distribution(q: UsageQuery, measure: Measure) {
+      const params: unknown[] = [q.from, q.to];
+      const extra: string[] = [];
+      if (q.organization !== null) {
+        params.push(q.organization);
+        extra.push(`AND organization_id = $${params.length}`);
+      }
+      if (q.groupBy !== null) {
+        params.push(q.group);
+        extra.push(`AND ${GROUPS[q.groupBy]} = $${params.length}`);
+      }
+      const { rows } = await pool.query<{
+        p: number;
+        n: number;
+        total: string;
+        share: number;
+      }>(
+        `WITH u AS (
+           SELECT subject_id, sum(${MEASURES[measure]}) AS v
+           FROM usage_events
+           WHERE time >= $1::timestamptz AND time < $2::timestamptz AND end_user
+             ${extra.join(" ")}
+           GROUP BY subject_id
+         ), r AS (
+           SELECT row_number() OVER w AS rn, sum(v) OVER w AS cum,
+                  count(*) OVER () AS n, sum(v) OVER () AS total
+           FROM u WINDOW w AS (ORDER BY v DESC, subject_id)
+         )
+         SELECT p, r.n::int AS n, r.total::text AS total,
+                coalesce(r.cum / nullif(r.total, 0), 0)::float8 AS share
+         FROM generate_series(1, 100) p
+         JOIN r ON r.rn = ceil(r.n * p / 100.0)
+         ORDER BY p`,
+        params,
+      );
+      return {
+        users: rows[0]?.n ?? 0,
+        total: rows[0]?.total ?? "0",
+        data: rows.map((r) => ({ topUsersPercent: r.p, share: r.share })),
       };
     },
 

@@ -19,6 +19,7 @@ import {
   type GroupBy,
   KIND_OF_PATH,
   type Kind,
+  parseMeasure,
   parseUsageQuery,
   RUN_ID,
   TAG_ID,
@@ -668,6 +669,19 @@ export function createGateway(deps: GatewayDeps) {
       });
     }
 
+    if (endpoint === "GET /v1/usage/distribution") {
+      requireScope(who, "ai:usage:read");
+      const q = parseUsageQuery(url, who, true);
+      const measure = parseMeasure(url);
+      return send(res, 200, {
+        from: q.from.toISOString(),
+        to: q.to.toISOString(),
+        groupBy: q.groupBy,
+        group: q.group,
+        measure,
+        ...(await analyticsStore(analytics.distribution(q, measure))),
+      });
+    }
     if (
       endpoint === "GET /v1/usage/summary" ||
       endpoint === "GET /v1/usage/series"
