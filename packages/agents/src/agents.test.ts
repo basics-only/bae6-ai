@@ -15,6 +15,7 @@ const limits: Limits = {
   timeoutMs: 5000,
   toolTimeoutMs: 1000,
   maxToolOutputChars: 20,
+  maxHistoryChars: 10_000,
 };
 const usage = { inputTokens: 10, outputTokens: 5 };
 
@@ -396,5 +397,57 @@ test("treats prototype-key tool names as unavailable", async () => {
   assert.deepEqual(
     r.receipts.map((x) => x.outcome),
     ["not_allowed", "not_allowed"],
+  );
+});
+
+test("does not record or replay input the tool refused", async () => {
+  const secret = "AKIAABCDEFGHIJKLMNOP";
+  const seen: AgentMessage[][] = [];
+  const guarded: Tool = {
+    ...echo,
+    parse() {
+      throw new Error("input blocked: aws-key");
+    },
+  };
+  const agent = createAgent({
+    model: script(
+      [call("echo", { q: secret }), call("other", { q: secret }), final],
+      seen,
+    ),
+    tools: [guarded],
+    allow: ["echo"],
+    limits,
+  });
+  const r = await agent.run("t", signal());
+  assert.deepEqual(
+    r.receipts.map((x) => x.outcome),
+    ["invalid_input", "not_allowed"],
+  );
+  assert.equal(JSON.stringify([r.receipts, seen]).includes(secret), false);
+});
+
+test("stops when the conversation outgrows the history bound", async () => {
+  const big: Tool = { ...echo, run: async () => "x".repeat(20) };
+  const agent = createAgent({
+    model: script([call("echo", { q: "a" })]),
+    tools: [big],
+    allow: ["echo"],
+    limits: { ...limits, maxSteps: 100, maxHistoryChars: 200 },
+  });
+  const r = await agent.run("t", signal());
+  assert.equal(r.stop, "history_limit");
+  assert.ok(r.receipts.length < 100);
+});
+
+test("rejects a task larger than the history bound", async () => {
+  const agent = createAgent({
+    model: script([final]),
+    tools: [],
+    allow: [],
+    limits: { ...limits, maxHistoryChars: 5 },
+  });
+  assert.equal(
+    (await agent.run("x".repeat(6), signal())).stop,
+    "history_limit",
   );
 });
