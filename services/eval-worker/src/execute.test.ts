@@ -6,7 +6,8 @@ import { createExecutor } from "./execute.js";
 import type { Claimed } from "./store.js";
 
 let answer: (input: string) => { status: number; content?: unknown };
-const seen: { auth?: string; model?: string; maxTokens?: number }[] = [];
+const seen: { auth: string | undefined; model: string; maxTokens: number }[] =
+  [];
 const gateway = createServer((req, res) => {
   let raw = "";
   req.on("data", (c) => {
@@ -105,4 +106,14 @@ test("an aborted run reports aborted without a report", async () => {
   ctl.abort();
   const out = await executor()(claimed(["exact"]), ctl.signal);
   assert.deepEqual(out, { stop: "aborted", report: undefined });
+});
+
+test("a run where every case failed is a model_error, not a complete run", async () => {
+  answer = () => ({ status: 503 });
+  const out = await executor()(
+    claimed(["exact"]),
+    new AbortController().signal,
+  );
+  assert.equal(out.stop, "model_error");
+  assert.equal(out.report?.failures, 2);
 });

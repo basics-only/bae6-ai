@@ -25,6 +25,7 @@ const sleep = (ms: number, signal: AbortSignal) =>
 export function createRunner(o: RunnerOptions) {
   const { store, log = () => {} } = o;
   const shutdown = new AbortController();
+  const claiming = new AbortController();
   let slots: Promise<void>[] = [];
   let reaper: NodeJS.Timeout | undefined;
 
@@ -91,7 +92,7 @@ export function createRunner(o: RunnerOptions) {
   }
 
   async function slot(): Promise<void> {
-    while (!shutdown.signal.aborted) {
+    while (!claiming.signal.aborted) {
       let run: Claimed | null = null;
       try {
         run = await store.claim(o.leaseMs);
@@ -99,7 +100,7 @@ export function createRunner(o: RunnerOptions) {
         log({ msg: "claim_failed", error: (err as Error).name });
       }
       if (run) await runOne(run);
-      else await sleep(o.pollMs, shutdown.signal);
+      else await sleep(o.pollMs, claiming.signal);
     }
   }
 
@@ -114,9 +115,14 @@ export function createRunner(o: RunnerOptions) {
       }, o.leaseMs / 2);
       reaper.unref();
     },
+    /** Stops claiming; runs already started carry on. */
+    pause() {
+      claiming.abort();
+    },
     /** Stops claiming and interrupts running work; resolves once every slot has returned. */
     async stop() {
       clearInterval(reaper);
+      claiming.abort();
       shutdown.abort();
       await Promise.all(slots);
     },

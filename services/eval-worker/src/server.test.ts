@@ -240,6 +240,7 @@ test("malformed requests are refused", { skip }, async () => {
     { ...evalRun, scorers: ["unknown"] },
     { ...evalRun, scorers: ["exact", "exact"] },
     { ...evalRun, scorers: [] },
+    { ...evalRun, scorers: null },
     [],
   ]) {
     assert.equal(

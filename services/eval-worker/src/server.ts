@@ -118,7 +118,7 @@ export function createWorkerServer(deps: WorkerDeps) {
     if (typeof o.model !== "string" || !MODEL.test(o.model)) {
       throw invalid("model is not a valid model id.");
     }
-    const scorers = o.scorers ?? ["exact"];
+    const scorers = o.scorers === undefined ? ["exact"] : o.scorers;
     if (
       !Array.isArray(scorers) ||
       scorers.length < 1 ||

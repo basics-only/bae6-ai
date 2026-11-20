@@ -102,6 +102,7 @@ runner.start();
 
 process.once("SIGTERM", () => {
   server.drain();
+  runner.pause();
   setTimeout(() => {
     server.close();
     server.closeIdleConnections();

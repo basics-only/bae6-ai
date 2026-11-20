@@ -188,3 +188,36 @@ test(
     assert.equal((await r.get())?.status, "queued");
   },
 );
+
+test("a paused runner claims nothing new", { skip }, async () => {
+  const w = runner(async () => ({ stop: "complete", report: undefined }));
+  w.start();
+  await new Promise((r) => setTimeout(r, 50));
+  w.pause();
+  await new Promise((r) => setTimeout(r, 50));
+  const r = await submit();
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal((await r.get())?.status, "queued");
+  await w.stop();
+});
+
+test("pausing lets a run already started finish", { skip }, async () => {
+  const r = await submit();
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started = false;
+  const w = runner(async () => {
+    started = true;
+    await gate;
+    return { stop: "complete", report: undefined };
+  });
+  w.start();
+  await until(async () => started, Boolean);
+  w.pause();
+  release();
+  const done = await until(r.get, (v) => v?.status === "finished");
+  await w.stop();
+  assert.equal(done?.stop, "complete");
+});

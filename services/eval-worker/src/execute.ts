@@ -40,7 +40,10 @@ async function complete(
     }),
     signal: AbortSignal.any([signal, AbortSignal.timeout(o.requestTimeoutMs)]),
   });
-  if (!res.ok) throw new Error(`gateway returned ${res.status}`);
+  if (!res.ok) {
+    await res.body?.cancel();
+    throw new Error(`gateway returned ${res.status}`);
+  }
   const body = (await res.json()) as {
     choices?: { message?: { content?: unknown } }[];
   };
@@ -69,7 +72,9 @@ export function createExecutor(o: ExecuteOptions) {
         signal,
         runId: `eval_${run.id}`,
       });
-      return { stop: "complete", report };
+      const allFailed =
+        report.cases.length > 0 && report.failures === report.cases.length;
+      return { stop: allFailed ? "model_error" : "complete", report };
     } catch (err) {
       if (signal.aborted) return { stop: "aborted", report: undefined };
       throw err;
