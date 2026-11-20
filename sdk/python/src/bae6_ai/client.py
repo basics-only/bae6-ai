@@ -251,6 +251,13 @@ class Ai:
             raise _invalid_response()
         return body
 
+    async def credentials(self, *, end_user_token: str | None = None) -> list[dict[str, Any]]:
+        """Where each configured provider's cloud credentials come from, never the credentials."""
+        body = await self._call("GET", "/v1/credentials", end_user_token, None, None)
+        if not isinstance(body.get("data"), list):
+            raise _invalid_response()
+        return body["data"]
+
     async def feedback(
         self,
         *,

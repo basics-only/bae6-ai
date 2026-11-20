@@ -184,6 +184,10 @@ const identities: Record<string, Identity> = {
 };
 
 const server = createGateway({
+  credentials: () => [
+    { provider: "bedrock", source: "pod-identity", lastRefreshAgeSeconds: 12 },
+    { provider: "vertex", source: "metadata", lastRefreshAgeSeconds: null },
+  ],
   verify: async (t) => (t ? (identities[t] ?? null) : null),
   ledger,
   feedback,
@@ -335,7 +339,7 @@ test("every documented route is served", async () => {
         ? [["GET", path]]
         : Object.keys(item).map((m) => [m.toUpperCase(), path]),
   );
-  assert.equal(routes.length, 9);
+  assert.equal(routes.length, 10);
   for (const [method, path] of routes) {
     const body = method === "POST" ? {} : undefined;
     const res = await call(method as string, path as string, "noscope", body);
@@ -361,9 +365,15 @@ test("responses conform to the contract", async () => {
   conforms("ModelList", await (await call("GET", "/v1/models", "acme")).json());
   conforms("Budget", await (await call("GET", "/v1/budgets", "reader")).json());
   conforms("Usage", await (await call("GET", "/v1/usage", "reader")).json());
+  conforms(
+    "CredentialStatusList",
+    await (await call("GET", "/v1/credentials", "reader")).json(),
+  );
   for (const [res, status, code] of [
     [await post(undefined, hi), 401, "unauthenticated"],
     [await post("noscope", hi), 403, "forbidden"],
+    [await call("GET", "/v1/credentials", "acme"), 403, "forbidden"],
+    [await call("GET", "/v1/credentials", "unknown"), 401, "unauthenticated"],
     [await post("globex", hi), 404, "not_found"],
     [await post("acme", { ...hi, tools: [] }), 400, "unsupported_parameter"],
     [

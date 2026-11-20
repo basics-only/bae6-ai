@@ -32,7 +32,14 @@ export interface GatewayModel {
   provider: ModelProvider;
 }
 
+export interface CredentialStatus {
+  provider: "bedrock" | "vertex";
+  source: string;
+  lastRefreshAgeSeconds: number | null;
+}
+
 export interface GatewayDeps {
+  credentials: () => CredentialStatus[];
   verify: Verifier;
   ledger: Ledger;
   feedback: Feedback;
@@ -548,6 +555,10 @@ export function createGateway(deps: GatewayDeps) {
         spent: b.spent ?? "0",
         reserved: b.reserved ?? "0",
       });
+    }
+    if (endpoint === "GET /v1/credentials") {
+      requireScope(who, "ai:usage:read");
+      return send(res, 200, { data: deps.credentials() });
     }
     if (endpoint === "GET /v1/usage") {
       requireScope(who, "ai:usage:read");

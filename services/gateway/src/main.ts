@@ -7,7 +7,13 @@ import {
 } from "@bae6/ai-core";
 import pg from "pg";
 import { type ModelConfig, parseConfig } from "./config.js";
-import { awsCredentials, gcpToken, hasCloudIdentity } from "./credentials.js";
+import {
+  awsCredentials,
+  awsSource,
+  gcpToken,
+  hasCloudIdentity,
+  type RefreshState,
+} from "./credentials.js";
 import { createFeedback } from "./feedback.js";
 import { createVerifier, type Issuer } from "./identity.js";
 import { createLedger } from "./ledger.js";
@@ -97,8 +103,34 @@ const descriptor = (m: ModelConfig): ModelDescriptor => ({
   attributes: { provider: m.provider, inputModalities: m.inputModalities },
 });
 
-const aws = awsCredentials(env);
-const gcp = gcpToken(env);
+const awsState: RefreshState = {};
+const gcpState: RefreshState = {};
+const aws = awsCredentials(env, awsState);
+const gcp = gcpToken(env, gcpState);
+const ageSeconds = (s: RefreshState) =>
+  s.lastRefresh === undefined
+    ? null
+    : Math.floor((Date.now() - s.lastRefresh) / 1000);
+const credentialStatus = () => [
+  ...(config.models.some((m) => m.provider === "bedrock")
+    ? [
+        {
+          provider: "bedrock" as const,
+          source: awsSource(env),
+          lastRefreshAgeSeconds: ageSeconds(awsState),
+        },
+      ]
+    : []),
+  ...(config.models.some((m) => m.provider === "vertex")
+    ? [
+        {
+          provider: "vertex" as const,
+          source: "metadata",
+          lastRefreshAgeSeconds: ageSeconds(gcpState),
+        },
+      ]
+    : []),
+];
 const models = new Map<string, GatewayModel>(
   config.models.map((m) => {
     const provider: ModelProvider =
@@ -141,6 +173,7 @@ const feedback = createFeedback(pool);
 const feedbackRetentionDays = int("BAE6_FEEDBACK_RETENTION_DAYS", 90, 1, 3650);
 
 const server = createGateway({
+  credentials: credentialStatus,
   verify: createVerifier(issuers, { allowHttpJwks }),
   ledger,
   feedback,
