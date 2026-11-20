@@ -623,6 +623,55 @@ test("distribution is empty when no end user called", { skip }, async () => {
   assert.deepEqual(d, { users: 0, total: "0", data: [] });
 });
 
+test(
+  "concentration gives each day's top 5, 10 and 20 percent shares",
+  { skip },
+  async () => {
+    const o = org();
+    for (let i = 0; i < 20; i++) {
+      await insert({
+        organization: o,
+        time: T,
+        subject: `u${i}`,
+        endUser: true,
+        cost: i === 0 ? "81" : "1",
+      });
+    }
+    await insert({
+      organization: o,
+      time: "2026-11-11T00:00:00Z",
+      subject: "a",
+      endUser: true,
+      cost: "7",
+    });
+    const rows = await analytics.concentration(
+      query({ groupBy: null, organization: o }),
+      "cost",
+    );
+    assert.deepEqual(
+      rows.map((r) => [r.day, r.users]),
+      [
+        ["2026-11-10", 20],
+        ["2026-11-11", 1],
+      ],
+    );
+    assert.equal(rows[0]?.top5, 0.81);
+    assert.equal(rows[0]?.top10, 0.82);
+    assert.equal(rows[0]?.top20, 0.84);
+    assert.equal(rows[1]?.top5, 1);
+  },
+);
+
+test("concentration is empty when no end user called", { skip }, async () => {
+  assert.deepEqual(
+    await analytics.concentration(
+      query({ groupBy: null, organization: org() }),
+      "cost",
+    ),
+    [],
+  );
+});
+
 test("parseMeasure defaults to tokens and refuses an unknown measure", () => {
   assert.equal(parseMeasure(new URL("http://x/")), "tokens");
   assert.equal(parseMeasure(new URL("http://x/?measure=cost")), "cost");

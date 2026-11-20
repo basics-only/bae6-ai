@@ -96,6 +96,12 @@ const analytics = {
     asked.push(q);
     return live([{ day: "2026-11-19", ...measures }]);
   },
+  concentration: async (q: UsageQuery) => {
+    asked.push(q);
+    return live([
+      { day: "2026-11-19", users: 5, top5: 0.4, top10: 0.5, top20: 0.7 },
+    ]);
+  },
   distribution: async (q: UsageQuery) => {
     asked.push(q);
     return live({
@@ -420,7 +426,7 @@ test("every documented route is served", async () => {
             .filter((m) => m !== "parameters")
             .map((m) => [m.toUpperCase(), path]),
   );
-  assert.equal(routes.length, 18);
+  assert.equal(routes.length, 19);
   for (const [method, path] of routes) {
     const body = method === "POST" ? {} : undefined;
     const res = await call(method as string, path as string, "noscope", body);
@@ -591,6 +597,28 @@ test("usage distribution is confined to the caller's organization and refuses an
     (await call("GET", "/v1/usage/distribution?measure=drop", "analyst"))
       .status,
     400,
+  );
+});
+
+test("usage concentration is confined to the caller's organization", async () => {
+  asked.length = 0;
+  const ok = await call("GET", "/v1/usage/concentration", "analyst");
+  assert.equal(ok.status, 200);
+  conforms("UsageConcentration", await ok.json());
+  assert.equal(asked[0]?.organization, "acme");
+  assert.equal(
+    (
+      await call(
+        "GET",
+        "/v1/usage/concentration?organization=globex",
+        "analyst",
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (await call("GET", "/v1/usage/concentration", "noscope")).status,
+    403,
   );
 });
 

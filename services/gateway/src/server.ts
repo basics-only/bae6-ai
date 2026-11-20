@@ -669,6 +669,19 @@ export function createGateway(deps: GatewayDeps) {
       });
     }
 
+    if (endpoint === "GET /v1/usage/concentration") {
+      requireScope(who, "ai:usage:read");
+      const q = parseUsageQuery(url, who, true);
+      const measure = parseMeasure(url);
+      return send(res, 200, {
+        from: q.from.toISOString(),
+        to: q.to.toISOString(),
+        groupBy: q.groupBy,
+        group: q.group,
+        measure,
+        data: await analyticsStore(analytics.concentration(q, measure)),
+      });
+    }
     if (endpoint === "GET /v1/usage/distribution") {
       requireScope(who, "ai:usage:read");
       const q = parseUsageQuery(url, who, true);
