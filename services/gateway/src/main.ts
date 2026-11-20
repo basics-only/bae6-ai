@@ -7,7 +7,7 @@ import {
 } from "@bae6/ai-core";
 import pg from "pg";
 import { type ModelConfig, parseConfig } from "./config.js";
-import { awsCredentials, gcpToken } from "./credentials.js";
+import { awsCredentials, gcpToken, hasCloudIdentity } from "./credentials.js";
 import { createFeedback } from "./feedback.js";
 import { createVerifier, type Issuer } from "./identity.js";
 import { createLedger } from "./ledger.js";
@@ -65,11 +65,11 @@ for (const m of config.models) {
 
 if (
   config.models.some((m) => m.provider === "bedrock") &&
-  !env.AWS_CONTAINER_CREDENTIALS_FULL_URI &&
+  !hasCloudIdentity(env) &&
   env.NODE_ENV !== "development"
 ) {
   throw new Error(
-    "Bedrock models need EKS Pod Identity (AWS_CONTAINER_CREDENTIALS_FULL_URI); static AWS keys require NODE_ENV=development",
+    "Bedrock models need EKS Pod Identity (AWS_CONTAINER_CREDENTIALS_FULL_URI) or web identity (AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE); static AWS keys require NODE_ENV=development",
   );
 }
 

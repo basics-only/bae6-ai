@@ -82,6 +82,15 @@ test("accepts Pod Identity outside development", () => {
   assert.match(run.stderr, /ECONNREFUSED/);
 });
 
+test("accepts web identity outside development", () => {
+  const run = boot(undefined, "production", {
+    AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/gateway",
+    AWS_WEB_IDENTITY_TOKEN_FILE: "/var/run/secrets/token",
+  });
+  assert.doesNotMatch(run.stderr, /need EKS Pod Identity/);
+  assert.match(run.stderr, /ECONNREFUSED/);
+});
+
 for (const flag of [
   "BAE6_ALLOW_HTTP_JWKS",
   "BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS",
