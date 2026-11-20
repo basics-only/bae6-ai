@@ -6,6 +6,7 @@ import {
   vertexProvider,
 } from "@bae6/ai-core";
 import pg from "pg";
+import { createAnalytics } from "./analytics.js";
 import { type ModelConfig, parseConfig } from "./config.js";
 import { awsCredentials, gcpToken } from "./credentials.js";
 import { createFeedback } from "./feedback.js";
@@ -128,12 +129,14 @@ const ledger = createLedger(pool, {
 });
 await ledger.publishPrices(config.priceBook.prices);
 const feedback = createFeedback(pool);
+const analytics = createAnalytics(pool);
 const feedbackRetentionDays = int("BAE6_FEEDBACK_RETENTION_DAYS", 90, 1, 3650);
 
 const server = createGateway({
   verify: createVerifier(issuers, { allowHttpJwks }),
   ledger,
   feedback,
+  analytics,
   models,
   budgets: config.budgets,
   timeoutMs,
