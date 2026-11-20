@@ -133,6 +133,22 @@ export interface UsageDistribution {
   data: { topUsersPercent: number; share: number }[];
 }
 
+export interface UsageConcentration {
+  from: string;
+  to: string;
+  groupBy: UsageGroupBy | null;
+  group: string | null;
+  measure: "tokens" | "cost";
+  /** Per UTC day with end-user calls: the share used by that day's top 5%, 10% and 20% of users. */
+  data: {
+    day: string;
+    users: number;
+    top5: number;
+    top10: number;
+    top20: number;
+  }[];
+}
+
 export interface Tag {
   id: string;
   name: string;
@@ -455,6 +471,30 @@ export class Ai {
     );
     if (!Array.isArray(body.data)) throw invalidResponse();
     return body as unknown as UsageDistribution;
+  }
+
+  /** How the top users' share of usage moves day by day; carries no user ids. */
+  async usageConcentration(
+    query: UsageRange & {
+      measure?: "tokens" | "cost";
+      groupBy?: UsageGroupBy;
+      group?: string;
+      organization?: string;
+    } = {},
+    options: CallOptions = {},
+  ): Promise<UsageConcentration> {
+    const q = range(query);
+    if (query.measure) q.set("measure", query.measure);
+    if (query.groupBy) q.set("groupBy", query.groupBy);
+    if (query.group) q.set("group", query.group);
+    if (query.organization) q.set("organization", query.organization);
+    const body = await this.#call(
+      "GET",
+      `/v1/usage/concentration?${q}`,
+      options,
+    );
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as UsageConcentration;
   }
 
   listTaskTypes(options: CallOptions = {}) {

@@ -240,6 +240,14 @@ test("usageDistribution sends the measure and narrowing", async () => {
   assert.equal(seenUrl.split(" ")[1]?.split("?")[0], "/v1/usage/distribution");
 });
 
+test("usageConcentration sends the measure to the concentration path", async () => {
+  reply = json(200, { data: [] });
+  await ai.usageConcentration({ measure: "cost" });
+  const target = seenUrl.split(" ")[1] ?? "";
+  assert.equal(target.split("?")[0], "/v1/usage/concentration");
+  assert.equal(new URL(target, "http://x").searchParams.get("measure"), "cost");
+});
+
 test("manages task types and domains, treating 204 as success", async () => {
   reply = json(200, { data: [{ id: "legal" }] });
   assert.deepEqual(await ai.listDomains(), [{ id: "legal" }]);
