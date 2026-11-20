@@ -810,3 +810,22 @@ test("series reports a quiet day as zeros", { skip }, async () => {
     ],
   );
 });
+
+test(
+  "distribution and concentration are empty when end users used none of the measure",
+  { skip },
+  async () => {
+    const o = org();
+    await insert({
+      organization: o,
+      time: T,
+      subject: "a",
+      endUser: true,
+      cost: "0",
+    });
+    const q = query({ groupBy: null, organization: o });
+    const d = await analytics.distribution(q, "cost");
+    assert.deepEqual([d.users, d.total, d.data], [1, "0", []]);
+    assert.deepEqual(await analytics.concentration(q, "cost"), []);
+  },
+);

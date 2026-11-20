@@ -327,7 +327,10 @@ export function createAnalytics(pool: pg.Pool, requestPool: pg.Pool = pool) {
       return {
         users: rows[0]?.n ?? 0,
         total: rows[0]?.total ?? "0",
-        data: rows.map((r) => ({ topUsersPercent: r.p, share: r.share })),
+        data:
+          Number(rows[0]?.total) > 0
+            ? rows.map((r) => ({ topUsersPercent: r.p, share: r.share }))
+            : [],
       };
     },
 
@@ -371,7 +374,7 @@ export function createAnalytics(pool: pg.Pool, requestPool: pg.Pool = pool) {
                  `coalesce(max(cum / nullif(total, 0)) FILTER (WHERE rn = ceil(n * ${p} / 100.0)), 0)::float8 AS top${p}`,
              )
              .join(", ")}
-         FROM r GROUP BY month ORDER BY month`,
+         FROM r GROUP BY month HAVING max(total) > 0 ORDER BY month`,
         params,
       );
       return rows;

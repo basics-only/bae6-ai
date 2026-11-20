@@ -317,7 +317,8 @@ paths:
         percent of end users, so `{ topUsersPercent: 10, share: 0.85 }` means the top 10% of
         users used 85%. Only calls made for an end user count. Carries no user ids. `groupBy`
         and `group` narrow it as in `/v1/usage/series`; scope rules are those of
-        `/v1/usage/summary`. With no end users `users` is 0 and `data` is empty.
+        `/v1/usage/summary`. With no end users `users` is 0 and `data` is empty; when the end users used none of
+        the measure, `users` is their count, `total` is `"0"` and `data` is empty.
       parameters:
         - $ref: "#/components/parameters/EndUserToken"
         - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
@@ -359,7 +360,7 @@ paths:
         For each UTC calendar month with end-user calls, the share of `measure` used by that
         month's top 5%, 10% and 20% of end users. The first and last month cover only the part
         inside the window. Parameters, scope rules and privacy are those of
-        `/v1/usage/distribution`. Months without end-user calls are left out.
+        `/v1/usage/distribution`. Months where end users used none of the measure are left out.
       parameters:
         - $ref: "#/components/parameters/EndUserToken"
         - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
