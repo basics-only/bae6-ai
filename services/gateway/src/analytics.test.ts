@@ -481,6 +481,7 @@ test("malformed windows, groups and run lists are refused", () => {
     "",
     "groupBy=user",
     "groupBy=model&from=yesterday",
+    "groupBy=model&from=2026-11-01T00:00:00",
     "groupBy=model&from=2026-01-01T00:00:00Z&to=2026-06-01T00:00:00Z",
     "groupBy=model&from=2026-02-01T00:00:00Z&to=2026-01-01T00:00:00Z",
     "groupBy=run",

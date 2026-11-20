@@ -16,7 +16,7 @@ const MAX_TAGS = 50;
 const MAX_GROUPS = 100;
 const MAX_RUNS = 50;
 const MAX_WINDOW_MS = 93 * 24 * 3600_000;
-const ISO = /^\d{4}-\d{2}-\d{2}T/;
+const ISO = /^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:\d{2})$/;
 // Fixed strings, never user input: they are spliced into SQL.
 const GROUPS = {
   organization: "organization_id",
