@@ -248,6 +248,13 @@ test("usageConcentration sends the measure to the concentration path", async () 
   assert.equal(new URL(target, "http://x").searchParams.get("measure"), "cost");
 });
 
+test("an empty group is sent, as the Python SDK does", async () => {
+  reply = json(200, { data: [] });
+  await ai.usageSeries({ groupBy: "taskType", group: "" });
+  const q = new URL(seenUrl.split(" ")[1] ?? "", "http://x").searchParams;
+  assert.equal(q.get("group"), "");
+});
+
 test("manages task types and domains, treating 204 as success", async () => {
   reply = json(200, { data: [{ id: "legal" }] });
   assert.deepEqual(await ai.listDomains(), [{ id: "legal" }]);

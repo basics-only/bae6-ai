@@ -290,6 +290,21 @@ function range(r: UsageRange) {
   return q;
 }
 
+function narrow(
+  q: URLSearchParams,
+  query: {
+    measure?: string;
+    groupBy?: string;
+    group?: string;
+    organization?: string;
+  },
+) {
+  for (const k of ["measure", "groupBy", "group", "organization"] as const) {
+    const v = query[k];
+    if (v !== undefined) q.set(k, v);
+  }
+}
+
 export class Ai {
   readonly #baseUrl: string;
   readonly #credentials: string;
@@ -441,9 +456,7 @@ export class Ai {
     options: CallOptions = {},
   ): Promise<UsageSeries> {
     const q = range(query);
-    if (query.groupBy) q.set("groupBy", query.groupBy);
-    if (query.group) q.set("group", query.group);
-    if (query.organization) q.set("organization", query.organization);
+    narrow(q, query);
     const body = await this.#call("GET", `/v1/usage/series?${q}`, options);
     if (!Array.isArray(body.data)) throw invalidResponse();
     return body as unknown as UsageSeries;
@@ -460,10 +473,7 @@ export class Ai {
     options: CallOptions = {},
   ): Promise<UsageDistribution> {
     const q = range(query);
-    if (query.measure) q.set("measure", query.measure);
-    if (query.groupBy) q.set("groupBy", query.groupBy);
-    if (query.group) q.set("group", query.group);
-    if (query.organization) q.set("organization", query.organization);
+    narrow(q, query);
     const body = await this.#call(
       "GET",
       `/v1/usage/distribution?${q}`,
@@ -484,10 +494,7 @@ export class Ai {
     options: CallOptions = {},
   ): Promise<UsageConcentration> {
     const q = range(query);
-    if (query.measure) q.set("measure", query.measure);
-    if (query.groupBy) q.set("groupBy", query.groupBy);
-    if (query.group) q.set("group", query.group);
-    if (query.organization) q.set("organization", query.organization);
+    narrow(q, query);
     const body = await this.#call(
       "GET",
       `/v1/usage/concentration?${q}`,
