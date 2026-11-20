@@ -11,6 +11,7 @@ from bae6_ai import (
     AiApiError,
     AiAuthError,
     AiBudgetError,
+    AiError,
     AiTimeoutError,
     AiTransportError,
 )
@@ -20,9 +21,14 @@ USAGE = {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
 TOKEN = "SECRET\nX"
 
 
-def run(handler, call):
+def run(handler, call, agent_runs_url="http://worker/"):
     async def go():
-        async with Ai("http://gw", "svc-token", transport=httpx.MockTransport(handler)) as ai:
+        async with Ai(
+            "http://gw",
+            "svc-token",
+            transport=httpx.MockTransport(handler),
+            agent_runs_url=agent_runs_url,
+        ) as ai:
             return await call(ai)
 
     return asyncio.run(go())
@@ -168,3 +174,39 @@ def test_submits_feedback_and_pages_through_the_listing() -> None:
     with pytest.raises(AiApiError) as raised:
         run(handler, lambda ai: ai.feedback(request_id="chatcmpl-led_y", verdict="positive"))
     assert raised.value.status == 404
+
+
+def test_agent_runs_go_to_the_worker_and_accept_its_202() -> None:
+    seen: list[httpx.Request] = []
+    made = {"id": "run_00000000-0000-0000-0000-000000000000", "status": "queued", "receipts": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "GET" and request.url.path == "/v1/agent-runs":
+            return httpx.Response(200, json={"data": [], "nextCursor": None})
+        return httpx.Response(202 if request.method == "POST" else 200, json=made)
+
+    run_ = run(
+        handler,
+        lambda ai: ai.create_agent_run(task="t", model="m", idempotency_key="key-00001"),
+    )
+    assert run_["status"] == "queued"
+    assert str(seen[0].url) == "http://worker/v1/agent-runs"
+    assert seen[0].headers["idempotency-key"] == "key-00001"
+    assert json.loads(seen[0].content) == {"task": "t", "model": "m"}
+
+    run(handler, lambda ai: ai.cancel_agent_run(made["id"]))
+    assert seen[1].url.path == f"/v1/agent-runs/{made['id']}/cancel"
+
+    run(handler, lambda ai: ai.list_agent_runs(status="finished", limit=5))
+    assert dict(seen[2].url.params) == {"status": "finished", "limit": "5"}
+
+    def full(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"code": "queue_full", "retryAfterSeconds": 5})
+
+    with pytest.raises(AiApiError) as raised:
+        run(full, lambda ai: ai.create_agent_run(task="t", model="m"))
+    assert raised.value.retry_after_seconds == 5
+
+    with pytest.raises(AiError, match="agent_runs_url is not configured"):
+        run(handler, lambda ai: ai.get_agent_run(made["id"]), agent_runs_url=None)

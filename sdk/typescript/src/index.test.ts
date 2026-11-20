@@ -201,3 +201,48 @@ test("submits feedback and pages through the listing", async () => {
   assert.ok(err instanceof AiApiError);
   assert.equal(err.status, 404);
 });
+
+test("agent runs go to the worker and accept its 202", async () => {
+  const run = {
+    id: "run_00000000-0000-0000-0000-000000000000",
+    status: "queued",
+    receipts: [],
+  };
+  const worker = new Ai({
+    baseUrl: "http://127.0.0.1:1",
+    agentRunsUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/`,
+    credentials: "svc-token",
+  });
+  reply = json(202, run);
+  const made = await worker.createAgentRun(
+    { task: "t", model: "m" },
+    { idempotencyKey: "key-00001" },
+  );
+  assert.equal(seenUrl, "POST /v1/agent-runs");
+  assert.equal(seen["idempotency-key"], "key-00001");
+  assert.equal(made.status, "queued");
+
+  reply = json(200, run);
+  await worker.cancelAgentRun(made.id);
+  assert.equal(seenUrl, `POST /v1/agent-runs/${made.id}/cancel`);
+
+  reply = json(200, { data: [], nextCursor: null });
+  await worker.listAgentRuns({ status: "finished", limit: 5 });
+  assert.equal(seenUrl, "GET /v1/agent-runs?status=finished&limit=5");
+
+  reply = json(429, {
+    code: "queue_full",
+    message: "full",
+    retryAfterSeconds: 5,
+  });
+  const err = await worker
+    .createAgentRun({ task: "t", model: "m" })
+    .catch((e: unknown) => e);
+  assert.ok(err instanceof AiApiError);
+  assert.equal(err.retryAfterSeconds, 5);
+
+  await assert.rejects(
+    ai.getAgentRun(made.id),
+    /agentRunsUrl is not configured/,
+  );
+});
