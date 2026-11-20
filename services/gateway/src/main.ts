@@ -137,7 +137,7 @@ const ledger = createLedger(pool, {
 });
 await ledger.publishPrices(config.priceBook.prices);
 const feedback = createFeedback(pool);
-const analytics = createAnalytics(analyticsPool);
+const analytics = createAnalytics(analyticsPool, pool);
 const feedbackRetentionDays = int("BAE6_FEEDBACK_RETENTION_DAYS", 90, 1, 3650);
 
 const server = createGateway({

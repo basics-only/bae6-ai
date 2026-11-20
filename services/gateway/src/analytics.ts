@@ -148,8 +148,10 @@ const aggregates = (f: string) => `
   percentile_cont(0.5) WITHIN GROUP (ORDER BY first_token_ms) FILTER (WHERE ${f}) AS f50,
   percentile_cont(0.95) WITHIN GROUP (ORDER BY first_token_ms) FILTER (WHERE ${f}) AS f95`;
 
+const PERSON = "(organization_id, application_id, subject_id)";
+
 /** Usage by tag, run and day, and the tags themselves (ADR-0011); the same database as the ledger. */
-export function createAnalytics(pool: pg.Pool) {
+export function createAnalytics(pool: pg.Pool, requestPool: pg.Pool = pool) {
   return {
     async tags(organizationId: string, kind: Kind) {
       const { rows } = await pool.query<{
@@ -169,7 +171,7 @@ export function createAnalytics(pool: pg.Pool) {
     },
 
     async defined(organizationId: string, kind: Kind, id: string) {
-      const { rowCount } = await pool.query(
+      const { rowCount } = await requestPool.query(
         "SELECT 1 FROM tags WHERE organization_id = $1 AND kind = $2 AND id = $3",
         [organizationId, kind, id],
       );
@@ -246,7 +248,7 @@ export function createAnalytics(pool: pg.Pool) {
       }
       const inWindow = "time >= $1::timestamptz";
       const active = (hours: number) =>
-        `count(DISTINCT subject_id) FILTER (WHERE end_user AND time >= $2::timestamptz - interval '${hours} hours')::int`;
+        `count(DISTINCT ${PERSON}) FILTER (WHERE end_user AND time >= $2::timestamptz - interval '${hours} hours')::int`;
       const { rows } = await pool.query<MeasureRow & { key: string }>(
         `SELECT ${GROUPS[q.groupBy]} AS key, ${aggregates(inWindow)},
            ${active(HOURS.day)} AS au_day, ${active(HOURS.week)} AS au_week,
@@ -285,7 +287,7 @@ export function createAnalytics(pool: pg.Pool) {
           SELECT CASE WHEN prev IS NULL OR p >= prev + interval '${w} days'
                       THEN p ELSE prev + interval '${w} days' END AS s,
                  p + interval '${w - 1} days' AS e
-          FROM (SELECT p, lag(p) OVER (PARTITION BY subject_id ORDER BY p) AS prev FROM pairs) x
+          FROM (SELECT p, lag(p) OVER (PARTITION BY person ORDER BY p) AS prev FROM pairs) x
         ), edges_${w} AS (
           SELECT d, sum(v) AS v FROM (
             SELECT s AS d, 1 AS v FROM pieces_${w}
@@ -295,11 +297,11 @@ export function createAnalytics(pool: pg.Pool) {
           FROM calendar g(day) LEFT JOIN edges_${w} ON edges_${w}.d = g.day
         )`;
       const raw = (hours: number) =>
-        `count(DISTINCT subject_id) FILTER (WHERE t >= days.day_end - interval '${hours} hours')::int`;
+        `count(DISTINCT person) FILTER (WHERE t >= days.day_end - interval '${hours} hours')::int`;
       // Windows end at midnight except on the last day, which is counted over raw events.
       const { rows } = await pool.query<MeasureRow & { day: string }>(
         `WITH e AS MATERIALIZED (
-           SELECT time AT TIME ZONE 'UTC' AS t, subject_id, end_user, input_tokens,
+           SELECT time AT TIME ZONE 'UTC' AS t, ${PERSON} AS person, end_user, input_tokens,
              output_tokens, cost, latency_ms, first_token_ms
            FROM usage_events
            WHERE time >= $1::timestamptz - interval '720 hours' AND time < $2::timestamptz
@@ -308,7 +310,7 @@ export function createAnalytics(pool: pg.Pool) {
            SELECT date_trunc('day', t) AS d, ${aggregates("true")}
            FROM e WHERE t >= $1::timestamptz AT TIME ZONE 'UTC' GROUP BY 1
          ), pairs AS (
-           SELECT DISTINCT subject_id, date_trunc('day', t) AS p FROM e WHERE end_user
+           SELECT DISTINCT person, date_trunc('day', t) AS p FROM e WHERE end_user
          ), calendar AS (
            SELECT generate_series(
              date_trunc('day', ($1::timestamptz - interval '720 hours') AT TIME ZONE 'UTC'),

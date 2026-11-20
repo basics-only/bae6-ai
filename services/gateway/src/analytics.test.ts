@@ -50,6 +50,7 @@ interface Event {
   latencyMs?: number | null;
   firstTokenMs?: number | null;
   model?: string;
+  application?: string;
 }
 
 const insert = (e: Event) =>
@@ -57,7 +58,7 @@ const insert = (e: Event) =>
     `INSERT INTO usage_events (request_id, organization_id, application_id, subject_id,
        provider, model_id, price_book_version, input_tokens, output_tokens, cost, outcome,
        task_type, run_id, end_user, latency_ms, first_token_ms, time)
-     VALUES ($1, $2, 'app', $3, 'bedrock', $4, 'test-v1', 10, 5, $5, 'measured',
+     VALUES ($1, $2, $12, $3, 'bedrock', $4, 'test-v1', 10, 5, $5, 'measured',
        $6, $7, $8, $9, $10, $11)`,
     [
       `led_${randomUUID()}`,
@@ -71,6 +72,7 @@ const insert = (e: Event) =>
       e.latencyMs ?? null,
       e.firstTokenMs ?? null,
       e.time,
+      e.application ?? "app",
     ],
   );
 
@@ -496,3 +498,42 @@ test("malformed windows, groups and run lists are refused", () => {
     assert.throws(() => parse(bad, read, true), refused(400), bad);
   }
 });
+
+test(
+  "the same subject id in two applications counts as two active users",
+  { skip },
+  async () => {
+    const o = org();
+    for (const application of ["one", "two"]) {
+      await insert({
+        organization: o,
+        time: "2026-11-10T00:00:00Z",
+        subject: "u",
+        endUser: true,
+        application,
+      });
+    }
+    const q = query({
+      groupBy: null,
+      organization: o,
+      from: at("2026-11-09T00:00:00Z"),
+      to: at("2026-11-11T00:00:00Z"),
+    });
+    const days = await analytics.series(q);
+    assert.equal(days.at(-1)?.activeUsers.day, 2);
+    assert.equal(days.at(-1)?.activeUsers.month, 2);
+  },
+);
+
+test(
+  "tag lookups use the request pool, so a busy report pool cannot block them",
+  { skip },
+  async () => {
+    const o = org();
+    const reports = new pg.Pool({ connectionString: url, max: 1 });
+    await reports.end();
+    const split = createAnalytics(reports, pool);
+    await analytics.put(o, "domain", "legal", "Legal");
+    assert.equal(await split.defined(o, "domain", "legal"), true);
+  },
+);
