@@ -17,6 +17,7 @@ const finalized: Outcome[] = [];
 const reserved: { tags: Tags; endUser: boolean }[] = [];
 const timings: (Timing | undefined)[] = [];
 const keys: string[] = [];
+const claims = new Map<string, string>();
 let fail: ProviderError | undefined;
 let ledgerDown = false;
 let hold: Promise<void> | undefined;
@@ -34,11 +35,21 @@ const ledger = {
     timings.push(t);
     return true;
   },
-  claim: async () => ({ state: "new" }),
+  claim: async (_c: unknown, key: string, hash: string) => {
+    const seen = claims.get(key);
+    if (seen === undefined) {
+      claims.set(key, hash);
+      return { state: "new" };
+    }
+    return seen === hash
+      ? { state: "replay", status: 200, body: { replayed: true } }
+      : { state: "mismatch" };
+  },
   complete: async (_: unknown, _k: string, status: number) => {
     keys.push(`complete ${status}`);
   },
-  release: async () => {
+  release: async (_c: unknown, key: string) => {
+    claims.delete(key);
     keys.push("release");
   },
   budget: async () => {
@@ -77,10 +88,13 @@ const live = <T>(v: T) => {
   return v;
 };
 let tagLookupMs = 0;
+let summarizationDeleted = false;
 const analytics = {
   defined: async (_o: string, kind: string, id: string) => {
     await new Promise((r) => setTimeout(r, tagLookupMs));
-    return live(kind === "task_type" && id === "summarization");
+    return live(
+      kind === "task_type" && id === "summarization" && !summarizationDeleted,
+    );
   },
   tags: async () =>
     live([{ id: "summarization", name: "Summarization", updatedAt: tagTime }]),
@@ -493,6 +507,36 @@ test("a tag the organization has not defined is refused before any spend", async
     conforms("ErrorEnvelope", body);
   }
   assert.equal(reserved.length, 0);
+});
+
+const keyed = (key: string, headers: Record<string, string>) =>
+  tagged("acme", { "idempotency-key": key, ...headers });
+
+test("a retry replays after its tag was deleted, and a new key is refused", async () => {
+  const headers = { "bae6-task-type": "summarization" };
+  assert.equal((await keyed("key-tag-001", headers)).status, 200);
+  summarizationDeleted = true;
+  try {
+    const retry = await keyed("key-tag-001", headers);
+    assert.equal(retry.status, 200);
+    assert.equal(retry.headers.get("idempotent-replayed"), "true");
+    const fresh = await keyed("key-tag-002", headers);
+    assert.equal(fresh.status, 400);
+    assert.equal((await fresh.json()).code, "unknown_tag");
+    assert.equal(claims.has("key-tag-002"), false);
+  } finally {
+    summarizationDeleted = false;
+  }
+});
+
+test("a key reused with different tags is a conflict, not a replay", async () => {
+  assert.equal(
+    (await keyed("key-tag-003", { "bae6-task-type": "summarization" })).status,
+    200,
+  );
+  const other = await keyed("key-tag-003", { "bae6-run-id": "run-9" });
+  assert.equal(other.status, 409);
+  assert.equal((await other.json()).code, "idempotency_key_reused");
 });
 
 test("latency leaves out the time spent before the provider call", async () => {
