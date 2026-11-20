@@ -16,7 +16,8 @@ export type Outcome =
 
 export type Claim =
   | { state: "new"; requestId: string }
-  | { state: "replay"; status: number; body: unknown }
+  /** `modelId` is the model a route chose for the first call; null for a named model. */
+  | { state: "replay"; status: number; body: unknown; modelId: string | null }
   | { state: "in_progress" }
   | { state: "mismatch" };
 
@@ -46,6 +47,8 @@ export function createLedger(
       inputTokens: number;
       maxOutputTokens: number;
       leaseMs: number;
+      /** Set when a route chose the model. */
+      route?: { id: string; decision: string };
     }): Promise<string | null> {
       const { caller } = input;
       const period = periodOf();
@@ -81,8 +84,10 @@ export function createLedger(
         }
         await client.query(
           `INSERT INTO reservations (request_id, organization_id, period, application_id,
-             subject_id, provider, model_id, price_book_version, estimate, lease_expires)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + $10 * interval '1 millisecond')`,
+             subject_id, provider, model_id, price_book_version, estimate, lease_expires,
+             route_id, decision)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + $10 * interval '1 millisecond',
+             $11, $12)`,
           [
             input.requestId,
             caller.organizationId,
@@ -94,6 +99,8 @@ export function createLedger(
             priceBookVersion,
             estimate,
             input.leaseMs,
+            input.route?.id ?? null,
+            input.route?.decision ?? null,
           ],
         );
         await client.query("COMMIT");
@@ -123,9 +130,10 @@ export function createLedger(
              ON p.price_book_version = r.price_book_version AND p.model_id = r.model_id),
          e AS (
            INSERT INTO usage_events (request_id, organization_id, application_id, subject_id,
-             provider, model_id, price_book_version, input_tokens, output_tokens, cost, outcome)
+             provider, model_id, price_book_version, input_tokens, output_tokens, cost, outcome,
+             route_id, decision)
            SELECT request_id, organization_id, application_id, subject_id, provider, model_id,
-             price_book_version, $3::int, $4::int, cost, $2 FROM c)
+             price_book_version, $3::int, $4::int, cost, $2, route_id, decision FROM c)
          UPDATE budgets b SET reserved = b.reserved - c.estimate, spent = b.spent + c.cost
          FROM c WHERE b.organization_id = c.organization_id AND b.period = c.period`,
         [
@@ -154,9 +162,9 @@ export function createLedger(
            RETURNING *),
          e AS (
            INSERT INTO usage_events (request_id, organization_id, application_id, subject_id,
-             provider, model_id, price_book_version, cost, outcome)
+             provider, model_id, price_book_version, cost, outcome, route_id, decision)
            SELECT request_id, organization_id, application_id, subject_id, provider, model_id,
-             price_book_version, estimate, 'uncertain' FROM r),
+             price_book_version, estimate, 'uncertain', route_id, decision FROM r),
          t AS (SELECT organization_id, period, sum(estimate) AS total FROM r GROUP BY 1, 2),
          u AS (
            UPDATE budgets b SET reserved = b.reserved - t.total, spent = b.spent + t.total
@@ -196,8 +204,9 @@ export function createLedger(
         request_hash: string;
         response_status: number | null;
         response_body: unknown;
+        model_id: string | null;
       }>(
-        `SELECT request_hash, response_status, response_body FROM idempotency_keys
+        `SELECT request_hash, response_status, response_body, model_id FROM idempotency_keys
          WHERE organization_id = $1 AND application_id = $2 AND subject_id = $3 AND key = $4`,
         args,
       );
@@ -210,7 +219,23 @@ export function createLedger(
         state: "replay",
         status: row.response_status,
         body: row.response_body,
+        modelId: row.model_id,
       };
+    },
+
+    /** Records which model a route chose, so a replay can re-check access to it. */
+    async choose(caller: Caller, key: string, modelId: string) {
+      await pool.query(
+        `UPDATE idempotency_keys SET model_id = $5
+         WHERE organization_id = $1 AND application_id = $2 AND subject_id = $3 AND key = $4`,
+        [
+          caller.organizationId,
+          caller.applicationId,
+          caller.subjectId,
+          key,
+          modelId,
+        ],
+      );
     },
 
     async complete(caller: Caller, key: string, status: number, body: unknown) {

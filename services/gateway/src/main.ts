@@ -135,6 +135,7 @@ const server = createGateway({
   ledger,
   feedback,
   models,
+  routes: config.routes,
   budgets: config.budgets,
   timeoutMs,
   maxInflight,

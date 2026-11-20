@@ -123,6 +123,57 @@ test(
 );
 
 test(
+  "a route's decision survives both finalize and the reconciler, and a replay names the chosen model",
+  { skip },
+  async () => {
+    const c = caller();
+    const route = { id: "auto", decision: "rule:0" };
+    const settled = `led_${randomUUID()}`;
+    const abandoned = `led_${randomUUID()}`;
+    for (const [requestId, leaseMs] of [
+      [settled, 60_000],
+      [abandoned, -1000],
+    ] as const) {
+      assert.notEqual(
+        await ledger.reserve({
+          requestId,
+          caller: c,
+          limit: "5",
+          provider: "bedrock",
+          modelId: "m",
+          inputTokens: 1,
+          maxOutputTokens: 0,
+          leaseMs,
+          route,
+        }),
+        null,
+      );
+    }
+    await ledger.finalize(settled, { kind: "failed" });
+    while ((await ledger.reconcile()) > 0);
+    const { rows } = await pool.query(
+      "SELECT route_id, decision FROM usage_events WHERE request_id = ANY($1)",
+      [[settled, abandoned]],
+    );
+    assert.deepEqual(rows, [
+      { route_id: "auto", decision: "rule:0" },
+      { route_id: "auto", decision: "rule:0" },
+    ]);
+
+    await ledger.claim(c, "key-route-1", "h1", `led_${randomUUID()}`);
+    await ledger.choose(c, "key-route-1", "m");
+    await ledger.complete(c, "key-route-1", 200, { ok: true });
+    const replay = await ledger.claim(
+      c,
+      "key-route-1",
+      "h1",
+      `led_${randomUUID()}`,
+    );
+    assert.equal(replay.state === "replay" && replay.modelId, "m");
+  },
+);
+
+test(
   "an idempotency key replays, and refuses a different request",
   { skip },
   async () => {
@@ -141,6 +192,7 @@ test(
       state: "replay",
       status: 200,
       body: { ok: true },
+      modelId: null,
     });
     assert.equal(
       (await ledger.claim(c, "key-00001", "h2", rid())).state,

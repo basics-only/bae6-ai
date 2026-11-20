@@ -14,22 +14,31 @@ import {
   UnsupportedOperation,
   type Usage,
 } from "@bae6/ai-core";
-import type { ModelConfig } from "./config.js";
+import type { ModelConfig, RouteConfig } from "./config.js";
 import { type Feedback, parseFeedback } from "./feedback.js";
 import { envelope, HttpError, readBody, send } from "./http.js";
 import { type Identity, identify, type Verifier } from "./identity.js";
 import type { Caller, Ledger, Outcome } from "./ledger.js";
 import {
+  type ChatInput,
   chunk,
   completion,
   parseChat,
   parseEmbeddings,
   usageChunk,
 } from "./openai.js";
+import { pick } from "./routing.js";
 
 export interface GatewayModel {
   config: ModelConfig;
   provider: ModelProvider;
+}
+
+/** The one concrete model a request runs on, and the route that chose it, if any. */
+interface Chosen {
+  model: GatewayModel;
+  maxTokens: number;
+  route?: { id: string; decision: string };
 }
 
 export interface GatewayDeps {
@@ -37,6 +46,7 @@ export interface GatewayDeps {
   ledger: Ledger;
   feedback: Feedback;
   models: Map<string, GatewayModel>;
+  routes?: RouteConfig[];
   /** Monthly limit per organization; an organization without one cannot spend. */
   budgets: Record<string, string>;
   timeoutMs: number;
@@ -69,6 +79,42 @@ function requireScope(who: Who, scope: string) {
   if (!who.scopes.includes(scope)) {
     throw new HttpError(403, "forbidden", `Missing scope ${scope}.`);
   }
+}
+
+const mayUse = (c: { organizations?: string[] }, org: string) =>
+  !c.organizations || c.organizations.includes(org);
+
+const maxTokensFor = (config: ModelConfig, input: ChatInput) =>
+  input.maxTokens ?? Math.min(DEFAULT_MAX_TOKENS, config.maxOutputTokens);
+
+/** Why this model cannot take the request, or null if it can. */
+function fitError(config: ModelConfig, input: ChatInput): HttpError | null {
+  if (maxTokensFor(config, input) > config.maxOutputTokens) {
+    return new HttpError(
+      400,
+      "invalid_request",
+      `max_tokens is at most ${config.maxOutputTokens} for ${config.id}.`,
+    );
+  }
+  if (input.inputTokens > config.maxInputTokens) {
+    return new HttpError(
+      400,
+      "context_too_large",
+      `The input is over ${config.maxInputTokens} tokens for ${config.id}.`,
+    );
+  }
+  if (
+    input.messages.some((m) =>
+      m.content.some((p) => !config.inputModalities.includes(p.type)),
+    )
+  ) {
+    return new HttpError(
+      400,
+      "unsupported_modality",
+      `${config.id} accepts only ${config.inputModalities.join(", ")}.`,
+    );
+  }
+  return null;
 }
 
 const outcomeOf = (err: unknown): Outcome =>
@@ -109,6 +155,7 @@ function providerHttpError(err: unknown, timedOut: boolean): HttpError {
 
 export function createGateway(deps: GatewayDeps) {
   const { ledger, feedback, models, log = () => {} } = deps;
+  const routes = new Map((deps.routes ?? []).map((r) => [r.id, r]));
   // shortcut: fixed window per replica, so N replicas allow N times the limit; share it if that matters.
   const feedbackWindows = new Map<string, { start: number; count: number }>();
   let draining = false;
@@ -139,11 +186,7 @@ export function createGateway(deps: GatewayDeps) {
 
   function resolve(id: string, who: Who, op: Operation): GatewayModel {
     const m = models.get(id);
-    if (
-      !m ||
-      (m.config.organizations &&
-        !m.config.organizations.includes(who.organizationId))
-    ) {
+    if (!m || !mayUse(m.config, who.organizationId)) {
       throw new HttpError(404, "not_found", "Model not found.");
     }
     if (!m.config.operations.includes(op)) {
@@ -156,22 +199,36 @@ export function createGateway(deps: GatewayDeps) {
     return m;
   }
 
-  /** Claims the idempotency key (if any) and reserves budget; returns null after a replay. */
+  /**
+   * Claims the idempotency key (if any), picks the model and reserves budget; returns null
+   * after a replay. `choose` runs only for a new request, so a replay never pays for routing.
+   */
   async function begin(
     res: ServerResponse,
     who: Who,
-    model: GatewayModel,
     key: string | undefined,
     sha256: string,
     inputTokens: number,
-    maxOutputTokens: number,
-  ): Promise<string | null> {
+    choose: () => Chosen,
+  ): Promise<{ ledgerId: string; chosen: Chosen } | null> {
     const caller = callerOf(who);
     const ledgerId = `led_${randomUUID()}`;
     try {
       if (key) {
         const claim = await ledger.claim(caller, key, sha256, ledgerId);
         if (claim.state === "replay") {
+          const first =
+            claim.modelId === null ? undefined : models.get(claim.modelId);
+          if (
+            claim.modelId !== null &&
+            (!first || !mayUse(first.config, who.organizationId))
+          ) {
+            throw new HttpError(
+              409,
+              "conflict",
+              "The model that answered this request is no longer available to this organization.",
+            );
+          }
           res.setHeader("idempotent-replayed", "true");
           send(res, claim.status, claim.body);
           return null;
@@ -192,6 +249,16 @@ export function createGateway(deps: GatewayDeps) {
           );
         }
       }
+      let chosen: Chosen;
+      try {
+        chosen = choose();
+      } catch (err) {
+        if (key) await ledger.release(caller, key);
+        throw err;
+      }
+      const { model } = chosen;
+      if (key && chosen.route)
+        await ledger.choose(caller, key, model.config.id);
       const limit = deps.budgets[who.organizationId];
       const estimate =
         limit === undefined
@@ -203,8 +270,9 @@ export function createGateway(deps: GatewayDeps) {
               provider: model.config.provider,
               modelId: model.config.id,
               inputTokens,
-              maxOutputTokens,
+              maxOutputTokens: chosen.maxTokens,
               leaseMs: deps.timeoutMs + 60_000,
+              ...(chosen.route ? { route: chosen.route } : {}),
             });
       if (estimate === null) {
         if (key) await ledger.release(caller, key);
@@ -220,7 +288,15 @@ export function createGateway(deps: GatewayDeps) {
               "This request would exceed the organization's budget.",
             );
       }
-      return ledgerId;
+      if (chosen.route)
+        log({
+          msg: "route",
+          ledgerId,
+          route: chosen.route.id,
+          model: model.config.id,
+          decision: chosen.route.decision,
+        });
+      return { ledgerId, chosen };
     } catch (err) {
       if (err instanceof HttpError) throw err;
       log({ msg: "ledger_unavailable", error: (err as Error).name });
@@ -284,39 +360,47 @@ export function createGateway(deps: GatewayDeps) {
   ) {
     const { json, sha256 } = await readBody(req, MAX_BODY_BYTES);
     const input = parseChat(json);
-    const model = resolve(
-      input.model,
-      who,
-      input.stream ? "chat_stream" : "chat",
-    );
-    const { config } = model;
-    const maxTokens =
-      input.maxTokens ?? Math.min(DEFAULT_MAX_TOKENS, config.maxOutputTokens);
-    if (maxTokens > config.maxOutputTokens) {
-      throw new HttpError(
-        400,
-        "invalid_request",
-        `max_tokens is at most ${config.maxOutputTokens} for ${config.id}.`,
-      );
+    const op = input.stream ? "chat_stream" : "chat";
+    const route = routes.get(input.model);
+    if (route && !mayUse(route, who.organizationId)) {
+      throw new HttpError(404, "not_found", "Model not found.");
     }
-    if (input.inputTokens > config.maxInputTokens) {
-      throw new HttpError(
-        400,
-        "context_too_large",
-        `The input is over ${config.maxInputTokens} tokens for ${config.id}.`,
+    const named = (): Chosen => {
+      const model = resolve(input.model, who, op);
+      const err = fitError(model.config, input);
+      if (err) throw err;
+      return { model, maxTokens: maxTokensFor(model.config, input) };
+    };
+    const routed = (r: RouteConfig): Chosen => {
+      const usable = (id: string) => {
+        const m = models.get(id);
+        return (
+          m !== undefined &&
+          mayUse(m.config, who.organizationId) &&
+          m.config.operations.includes(op) &&
+          fitError(m.config, input) === null
+        );
+      };
+      const hasImages = input.messages.some((m) =>
+        m.content.some((p) => p.type === "image"),
       );
-    }
-    if (
-      input.messages.some((m) =>
-        m.content.some((p) => !config.inputModalities.includes(p.type)),
-      )
-    ) {
-      throw new HttpError(
-        400,
-        "unsupported_modality",
-        `${config.id} accepts only ${config.inputModalities.join(", ")}.`,
-      );
-    }
+      const c = pick(r, { inputTokens: input.inputTokens, hasImages }, usable);
+      if (!c) {
+        throw new HttpError(
+          400,
+          "no_eligible_model",
+          `No model on ${r.id} can serve this request.`,
+        );
+      }
+      const model = models.get(c.modelId) as GatewayModel;
+      return {
+        model,
+        maxTokens: maxTokensFor(model.config, input),
+        route: { id: r.id, decision: c.decision },
+      };
+    };
+    // A named model is checked before anything else; a route is resolved after the claim.
+    const first = route ? undefined : named();
     if (key && input.stream) {
       throw new HttpError(
         400,
@@ -324,16 +408,18 @@ export function createGateway(deps: GatewayDeps) {
         "Idempotency-Key is not supported with stream.",
       );
     }
-    const ledgerId = await begin(
+    const started = await begin(
       res,
       who,
-      model,
       key,
       sha256,
       input.inputTokens,
-      maxTokens,
+      first ? () => first : () => routed(route as RouteConfig),
     );
-    if (ledgerId === null) return;
+    if (started === null) return;
+    const { ledgerId, chosen } = started;
+    const { model, maxTokens } = chosen;
+    const { config } = model;
     const chatRequest = (signal: AbortSignal) => ({
       messages: input.messages as Message[],
       maxTokens,
@@ -431,6 +517,14 @@ export function createGateway(deps: GatewayDeps) {
   ) {
     const { json, sha256 } = await readBody(req, MAX_BODY_BYTES);
     const input = parseEmbeddings(json);
+    const route = routes.get(input.model);
+    if (route && mayUse(route, who.organizationId)) {
+      throw new HttpError(
+        400,
+        "unsupported_operation",
+        `${route.id} is a route and does not support embed.`,
+      );
+    }
     const model = resolve(input.model, who, "embed");
     if (input.inputTokens > model.config.maxInputTokens * input.input.length) {
       throw new HttpError(
@@ -439,16 +533,16 @@ export function createGateway(deps: GatewayDeps) {
         "An input is too long for this model.",
       );
     }
-    const ledgerId = await begin(
+    const started = await begin(
       res,
       who,
-      model,
       key,
       sha256,
       input.inputTokens,
-      0,
+      () => ({ model, maxTokens: 0 }),
     );
-    if (ledgerId === null) return;
+    if (started === null) return;
+    const { ledgerId } = started;
     return metered(res, requestId, who, ledgerId, key, async (signal) => {
       const r = await model.provider.embed(input.input, signal);
       const usage = { inputTokens: r.usage.inputTokens, outputTokens: 0 };
@@ -524,19 +618,49 @@ export function createGateway(deps: GatewayDeps) {
     if (endpoint === "GET /v1/models") {
       requireScope(who, "ai:invoke");
       const org = who.organizationId;
+      const visible = [...models.values()].filter((m) => mayUse(m.config, org));
+      const listed = [...routes.values()]
+        .filter((r) => mayUse(r, org))
+        .flatMap((r) => {
+          const ids = new Set([r.default, ...r.rules.map((x) => x.model)]);
+          const c = visible
+            .filter((m) => ids.has(m.config.id))
+            .map((m) => m.config);
+          if (c.length === 0) return [];
+          return [
+            {
+              id: r.id,
+              object: "route",
+              capabilities: {
+                kind: "model",
+                id: r.id,
+                operations: ["chat", "chat_stream"].filter((o) =>
+                  c.some((m) => m.operations.includes(o as Operation)),
+                ),
+                limits: {
+                  maxInputTokens: Math.max(...c.map((m) => m.maxInputTokens)),
+                  maxOutputTokens: Math.max(...c.map((m) => m.maxOutputTokens)),
+                },
+                attributes: {
+                  inputModalities: [
+                    ...new Set(c.flatMap((m) => m.inputModalities)),
+                  ],
+                },
+              },
+            },
+          ];
+        });
       return send(res, 200, {
         object: "list",
-        data: [...models.values()]
-          .filter(
-            (m) =>
-              !m.config.organizations || m.config.organizations.includes(org),
-          )
-          .map((m) => ({
+        data: [
+          ...visible.map((m) => ({
             id: m.config.id,
             object: "model",
             owned_by: m.config.provider,
             capabilities: m.provider.descriptor,
           })),
+          ...listed,
+        ],
       });
     }
     if (endpoint === "GET /v1/budgets") {
