@@ -5,6 +5,7 @@ import pg from "pg";
 import { createLedger, type Ledger } from "./ledger.js";
 import { migrate } from "./migrate.js";
 
+const untagged = { taskType: null, domain: null, runId: null };
 const url = process.env.BAE6_DATABASE_URL;
 const skip = url ? false : "BAE6_DATABASE_URL not set";
 let pool: pg.Pool;
@@ -42,6 +43,8 @@ const reserve = (c: ReturnType<typeof caller>, leaseMs = 60_000) =>
     inputTokens: 1_000_000,
     maxOutputTokens: 0,
     leaseMs,
+    tags: untagged,
+    endUser: false,
   });
 
 test("concurrent reserves never exceed the limit", { skip }, async () => {
@@ -67,6 +70,8 @@ test(
       inputTokens: 1_000_000,
       maxOutputTokens: 500_000,
       leaseMs: 60_000,
+      tags: untagged,
+      endUser: false,
     });
     assert.equal(Number(estimate), 2);
     assert.equal(await ledger.finalize(id, { kind: "uncertain" }), true);
@@ -98,6 +103,8 @@ test(
         inputTokens: 1_000_000,
         maxOutputTokens: 0,
         leaseMs: 60_000,
+        tags: untagged,
+        endUser: false,
       });
     }
     await ledger.finalize(ids[0] as string, {
@@ -145,6 +152,8 @@ test(
           maxOutputTokens: 0,
           leaseMs,
           route,
+          tags: untagged,
+          endUser: false,
         }),
         null,
       );
@@ -261,6 +270,8 @@ test(
               inputTokens: 1_000_000,
               maxOutputTokens: 0,
               leaseMs: 60_000,
+              tags: untagged,
+              endUser: false,
             });
             return held === null ? null : requestId;
           }),
