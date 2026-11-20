@@ -66,7 +66,9 @@ paths:
         `Idempotency-Key` is not supported with `stream`. A replayed response, success or a
         possibly billed `502`/`504`, carries `Idempotent-Replayed: true`. At most 20 images
         per request. A stream that fails after it started ends with one
-        `data: {"error": ErrorEnvelope}` event and no `[DONE]`.
+        `data: {"error": ErrorEnvelope}` event and no `[DONE]`. The `Bae6-*` tag headers are
+        part of the request: a key reused with different tags is `409 idempotency_key_reused`,
+        and a key already used replays even if its tag has since been deleted.
       parameters:
         - $ref: "#/components/parameters/EndUserToken"
         - $ref: "#/components/parameters/TaskType"

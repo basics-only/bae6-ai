@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
   createServer,
@@ -175,9 +175,8 @@ export function createGateway(deps: GatewayDeps) {
       );
     });
 
-  /** The call's tags; each must be one the organization defined, else nothing is spent. */
-  async function tagsOf(req: IncomingMessage, who: Who): Promise<Tags> {
-    const defined = async (header: string, name: string, kind: Kind) => {
+  function tagsOf(req: IncomingMessage): Tags {
+    const defined = (header: string, name: string) => {
       const v = req.headers[header];
       if (v === undefined) return null;
       if (typeof v !== "string" || !TAG_ID.test(v)) {
@@ -185,15 +184,6 @@ export function createGateway(deps: GatewayDeps) {
           400,
           "invalid_request",
           `${name} must match ${TAG_ID}.`,
-        );
-      }
-      if (
-        !(await analyticsStore(analytics.defined(who.organizationId, kind, v)))
-      ) {
-        throw new HttpError(
-          400,
-          "unknown_tag",
-          `${name} names a tag this organization has not defined.`,
         );
       }
       return v;
@@ -207,10 +197,30 @@ export function createGateway(deps: GatewayDeps) {
       );
     }
     return {
-      taskType: await defined("bae6-task-type", "Bae6-Task-Type", "task_type"),
-      domain: await defined("bae6-domain", "Bae6-Domain", "domain"),
+      taskType: defined("bae6-task-type", "Bae6-Task-Type"),
+      domain: defined("bae6-domain", "Bae6-Domain"),
       runId: run ?? null,
     };
+  }
+
+  /** Each tag must be one the organization defined, else nothing is spent. */
+  async function checkTags(who: Who, tags: Tags) {
+    const named: [Kind, string, string | null][] = [
+      ["task_type", "Bae6-Task-Type", tags.taskType],
+      ["domain", "Bae6-Domain", tags.domain],
+    ];
+    for (const [kind, name, id] of named) {
+      if (
+        id !== null &&
+        !(await analyticsStore(analytics.defined(who.organizationId, kind, id)))
+      ) {
+        throw new HttpError(
+          400,
+          "unknown_tag",
+          `${name} names a tag this organization has not defined.`,
+        );
+      }
+    }
   }
 
   function resolve(id: string, who: Who, op: Operation): GatewayModel {
@@ -247,7 +257,10 @@ export function createGateway(deps: GatewayDeps) {
     const ledgerId = `led_${randomUUID()}`;
     try {
       if (key) {
-        const claim = await ledger.claim(caller, key, sha256, ledgerId);
+        const requestHash = createHash("sha256")
+          .update(JSON.stringify([sha256, tags]))
+          .digest("hex");
+        const claim = await ledger.claim(caller, key, requestHash, ledgerId);
         if (claim.state === "replay") {
           res.setHeader("idempotent-replayed", "true");
           send(res, claim.status, claim.body);
@@ -268,6 +281,12 @@ export function createGateway(deps: GatewayDeps) {
             "This Idempotency-Key was used for a different request.",
           );
         }
+      }
+      try {
+        await checkTags(who, tags);
+      } catch (err) {
+        if (key) await ledger.release(caller, key).catch(() => {});
+        throw err;
       }
       const limit = deps.budgets[who.organizationId];
       const estimate =
@@ -880,7 +899,7 @@ export function createGateway(deps: GatewayDeps) {
     inflight++;
     inflightByOrg.set(org, orgInflight + 1);
     try {
-      const tags = await tagsOf(req, who);
+      const tags = tagsOf(req);
       await invoke(req, res, requestId, who, keyHeader, {
         tags,
         startedAt: started,
