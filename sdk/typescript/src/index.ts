@@ -81,6 +81,13 @@ export interface Budget {
   reserved: string;
 }
 
+export interface CredentialStatus {
+  provider: "bedrock" | "vertex";
+  source: "pod-identity" | "web-identity" | "metadata" | "development-static";
+  /** Null before the first refresh, and always for `development-static`. */
+  lastRefreshAgeSeconds: number | null;
+}
+
 export interface FeedbackRequest {
   /** The `id` of the chat completion being rated. */
   requestId: string;
@@ -327,6 +334,13 @@ export class Ai {
       throw invalidResponse();
     }
     return body as unknown as Budget;
+  }
+
+  /** Where each configured provider's cloud credentials come from, never the credentials. Needs `ai:usage:read`. */
+  async credentials(options: CallOptions = {}) {
+    const body = await this.#call("GET", "/v1/credentials", options);
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body.data as CredentialStatus[];
   }
 
   /** Rates one completion of this organization; rating it again replaces the first. Needs `feedback:write`. */

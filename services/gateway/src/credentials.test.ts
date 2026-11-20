@@ -7,7 +7,9 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import {
   awsCredentials,
+  awsSource,
   hasCloudIdentity,
+  type RefreshState,
   stsEndpoint,
 } from "./credentials.js";
 
@@ -131,4 +133,25 @@ test("rejects a region that could redirect the token to another host", () => {
     () => stsEndpoint({ AWS_REGION: "x.attacker.invalid/" }),
     /not a valid region/,
   );
+});
+
+test("records when credentials were last refreshed, not when they were last served", async () => {
+  const state: RefreshState = {};
+  const get = awsCredentials(env(), state);
+  assert.equal(state.lastRefresh, undefined);
+  await get();
+  const first = state.lastRefresh;
+  assert.notEqual(first, undefined);
+  await new Promise((r) => setTimeout(r, 5));
+  await get();
+  assert.equal(state.lastRefresh, first);
+});
+
+test("names the source from the environment", () => {
+  assert.equal(awsSource(env()), "web-identity");
+  assert.equal(
+    awsSource(env({ AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://x" })),
+    "pod-identity",
+  );
+  assert.equal(awsSource({ AWS_ACCESS_KEY_ID: "k" }), "development-static");
 });

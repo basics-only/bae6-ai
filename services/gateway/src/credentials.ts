@@ -3,7 +3,14 @@ import type { AwsCredentials } from "@bae6/ai-core";
 
 const REFRESH_EARLY_MS = 5 * 60_000;
 
-function cached<T>(fetchOne: () => Promise<{ value: T; expires: number }>) {
+export interface RefreshState {
+  lastRefresh?: number;
+}
+
+function cached<T>(
+  fetchOne: () => Promise<{ value: T; expires: number }>,
+  state: RefreshState = {},
+) {
   let current: { value: T; expires: number } | undefined;
   let inflight: Promise<{ value: T; expires: number }> | undefined;
   return async (): Promise<T> => {
@@ -14,6 +21,7 @@ function cached<T>(fetchOne: () => Promise<{ value: T; expires: number }>) {
       inflight = undefined;
     });
     current = await inflight;
+    state.lastRefresh = Date.now();
     return current.value;
   };
 }
@@ -42,6 +50,7 @@ function webIdentityCredentials(
   env: NodeJS.ProcessEnv,
   roleArn: string,
   tokenFile: string,
+  state: RefreshState,
 ): () => Promise<AwsCredentials> {
   const endpoint = stsEndpoint(env);
   const sessionName = env.AWS_ROLE_SESSION_NAME ?? "bae6-gateway";
@@ -93,7 +102,16 @@ function webIdentityCredentials(
       },
       expires: c.Expiration * 1000,
     };
-  });
+  }, state);
+}
+
+export type AwsSource = "pod-identity" | "web-identity" | "development-static";
+
+export function awsSource(env: NodeJS.ProcessEnv): AwsSource {
+  if (env.AWS_CONTAINER_CREDENTIALS_FULL_URI) return "pod-identity";
+  if (env.AWS_ROLE_ARN && env.AWS_WEB_IDENTITY_TOKEN_FILE)
+    return "web-identity";
+  return "development-static";
 }
 
 /**
@@ -102,6 +120,7 @@ function webIdentityCredentials(
  */
 export function awsCredentials(
   env: NodeJS.ProcessEnv,
+  state: RefreshState = {},
 ): () => Promise<AwsCredentials> {
   const uri = env.AWS_CONTAINER_CREDENTIALS_FULL_URI;
   if (!uri && env.AWS_ROLE_ARN && env.AWS_WEB_IDENTITY_TOKEN_FILE) {
@@ -109,6 +128,7 @@ export function awsCredentials(
       env,
       env.AWS_ROLE_ARN,
       env.AWS_WEB_IDENTITY_TOKEN_FILE,
+      state,
     );
   }
   if (uri) {
@@ -137,7 +157,7 @@ export function awsCredentials(
           ? Date.parse(b.Expiration)
           : Date.now() + REFRESH_EARLY_MS * 2,
       };
-    });
+    }, state);
   }
   return async () => {
     const { AWS_ACCESS_KEY_ID: id, AWS_SECRET_ACCESS_KEY: secret } = env;
@@ -151,7 +171,10 @@ export function awsCredentials(
 }
 
 /** An access token from the GCE/GKE metadata server (GKE Workload Identity). */
-export function gcpToken(env: NodeJS.ProcessEnv): () => Promise<string> {
+export function gcpToken(
+  env: NodeJS.ProcessEnv,
+  state: RefreshState = {},
+): () => Promise<string> {
   const host = env.GCE_METADATA_HOST ?? "metadata.google.internal";
   return cached(async () => {
     const res = await fetch(
@@ -170,5 +193,5 @@ export function gcpToken(env: NodeJS.ProcessEnv): () => Promise<string> {
       throw new Error("metadata server returned no token");
     }
     return { value: b.access_token, expires: Date.now() + b.expires_in * 1000 };
-  });
+  }, state);
 }
