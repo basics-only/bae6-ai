@@ -126,6 +126,9 @@ const analyticsPool = new pg.Pool({
   connectionTimeoutMillis: 5000,
   statement_timeout: 8_000,
 });
+for (const p of [pool, analyticsPool]) {
+  p.on("error", (err) => log({ msg: "pool_error", error: err.name }));
+}
 const client = await pool.connect();
 try {
   await migrate(client);
