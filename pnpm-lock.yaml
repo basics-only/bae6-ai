@@ -75,6 +75,37 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  services/agent-worker:
+    dependencies:
+      '@bae6/ai-agents':
+        specifier: workspace:*
+        version: link:../../packages/agents
+      jose:
+        specifier: 6.2.14
+        version: 6.2.14
+      pg:
+        specifier: 8.23.1
+        version: 8.23.1
+    devDependencies:
+      '@types/node':
+        specifier: 22.18.10
+        version: 22.18.10
+      '@types/pg':
+        specifier: 8.23.1
+        version: 8.23.1
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
+      tsx:
+        specifier: 4.20.6
+        version: 4.20.6
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      yaml:
+        specifier: 2.9.1
+        version: 2.9.1
+
   services/gateway:
     dependencies:
       '@bae6/ai-core':
