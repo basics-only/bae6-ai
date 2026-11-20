@@ -24,7 +24,11 @@ const config = (endpoint?: string) =>
     budgets: {},
   });
 
-function boot(flag: string, nodeEnv: string | undefined) {
+function boot(
+  flag: string | undefined,
+  nodeEnv: string | undefined,
+  extra: Record<string, string> = {},
+) {
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "",
     BAE6_DATABASE_URL: "postgres://x:x@127.0.0.1:1/x",
@@ -34,7 +38,8 @@ function boot(flag: string, nodeEnv: string | undefined) {
         ? "http://elsewhere:8080"
         : undefined,
     ),
-    [flag]: "true",
+    ...(flag ? { [flag]: "true" } : {}),
+    ...extra,
   };
   if (nodeEnv !== undefined) env.NODE_ENV = nodeEnv;
   return spawnSync(
@@ -48,6 +53,34 @@ function boot(flag: string, nodeEnv: string | undefined) {
     },
   );
 }
+
+test("refuses static AWS keys for Bedrock models unless NODE_ENV is development", () => {
+  for (const nodeEnv of [undefined, "", "production", "staging"]) {
+    const run = boot(undefined, nodeEnv, {
+      AWS_ACCESS_KEY_ID: "k",
+      AWS_SECRET_ACCESS_KEY: "s",
+    });
+    assert.notEqual(run.status, 0, `NODE_ENV=${nodeEnv}`);
+    assert.match(run.stderr, /need EKS Pod Identity/);
+  }
+});
+
+test("accepts static AWS keys when NODE_ENV is development", () => {
+  const run = boot(undefined, "development", {
+    AWS_ACCESS_KEY_ID: "k",
+    AWS_SECRET_ACCESS_KEY: "s",
+  });
+  assert.doesNotMatch(run.stderr, /need EKS Pod Identity/);
+  assert.match(run.stderr, /ECONNREFUSED/);
+});
+
+test("accepts Pod Identity outside development", () => {
+  const run = boot(undefined, "production", {
+    AWS_CONTAINER_CREDENTIALS_FULL_URI: "http://169.254.170.23/v1/credentials",
+  });
+  assert.doesNotMatch(run.stderr, /need EKS Pod Identity/);
+  assert.match(run.stderr, /ECONNREFUSED/);
+});
 
 for (const flag of [
   "BAE6_ALLOW_HTTP_JWKS",
