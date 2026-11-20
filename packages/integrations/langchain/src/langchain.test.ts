@@ -42,9 +42,36 @@ test("serializes non-string output and forwards the abort signal", async () => {
   assert.equal(seen, controller.signal);
 });
 
-test("carries the approval requirement through", () => {
+test("requires approval unless the caller opts out", () => {
+  assert.equal(fromLangChainTool(echo).requiresApproval, true);
   assert.equal(
-    fromLangChainTool(echo, { requiresApproval: true }).requiresApproval,
-    true,
+    fromLangChainTool(echo, { requiresApproval: false }).requiresApproval,
+    false,
   );
+});
+
+test("refuses a schema that cannot parse at adapt time", () => {
+  const jsonSchema = { type: "object" } as never;
+  assert.throws(
+    () => fromLangChainTool({ ...echo, schema: jsonSchema }),
+    /schema must have a parse function/,
+  );
+});
+
+test("a tool that returns nothing yields a string", async () => {
+  const tool = fromLangChainTool({
+    name: "n",
+    description: "d",
+    invoke: async () => undefined,
+  });
+  assert.equal(await tool.run({}, new AbortController().signal), "undefined");
+});
+
+test("a tool without a schema passes input through", () => {
+  const tool = fromLangChainTool({
+    name: "n",
+    description: "d",
+    invoke: async () => "",
+  });
+  assert.deepEqual(tool.parse({ a: 1 }), { a: 1 });
 });
