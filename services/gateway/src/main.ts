@@ -124,7 +124,7 @@ const credentialStatus = () => [
     ? [
         {
           provider: "vertex" as const,
-          source: "metadata",
+          source: "metadata" as const,
           lastRefreshAgeSeconds: ageSeconds(gcpState),
         },
       ]
