@@ -120,6 +120,35 @@ export interface UsageSeries {
   data: ({ day: string } & UsageMeasures)[];
 }
 
+export interface UsageDistribution {
+  from: string;
+  to: string;
+  groupBy: UsageGroupBy | null;
+  group: string | null;
+  measure: "tokens" | "cost";
+  /** Distinct end users in the window. */
+  users: number;
+  total: string;
+  /** `share` of the total used by the top `topUsersPercent` of users; empty with no users. */
+  data: { topUsersPercent: number; share: number }[];
+}
+
+export interface UsageConcentration {
+  from: string;
+  to: string;
+  groupBy: UsageGroupBy | null;
+  group: string | null;
+  measure: "tokens" | "cost";
+  /** Per UTC month ("2026-11") with end-user calls: the share used by that month's top 5%, 10% and 20% of users. */
+  data: {
+    month: string;
+    users: number;
+    top5: number;
+    top10: number;
+    top20: number;
+  }[];
+}
+
 export interface Tag {
   id: string;
   name: string;
@@ -266,6 +295,21 @@ function range(r: UsageRange) {
   if (r.from) q.set("from", r.from.toISOString());
   if (r.to) q.set("to", r.to.toISOString());
   return q;
+}
+
+function narrow(
+  q: URLSearchParams,
+  query: {
+    measure?: string;
+    groupBy?: string;
+    group?: string;
+    organization?: string;
+  },
+) {
+  for (const k of ["measure", "groupBy", "group", "organization"] as const) {
+    const v = query[k];
+    if (v !== undefined) q.set(k, v);
+  }
 }
 
 export class Ai {
@@ -419,12 +463,52 @@ export class Ai {
     options: CallOptions = {},
   ): Promise<UsageSeries> {
     const q = range(query);
-    if (query.groupBy) q.set("groupBy", query.groupBy);
-    if (query.group) q.set("group", query.group);
-    if (query.organization) q.set("organization", query.organization);
+    narrow(q, query);
     const body = await this.#call("GET", `/v1/usage/series?${q}`, options);
     if (!Array.isArray(body.data)) throw invalidResponse();
     return body as unknown as UsageSeries;
+  }
+
+  /** How concentrated usage is across end users; carries no user ids. */
+  async usageDistribution(
+    query: UsageRange & {
+      measure?: "tokens" | "cost";
+      groupBy?: UsageGroupBy;
+      group?: string;
+      organization?: string;
+    } = {},
+    options: CallOptions = {},
+  ): Promise<UsageDistribution> {
+    const q = range(query);
+    narrow(q, query);
+    const body = await this.#call(
+      "GET",
+      `/v1/usage/distribution?${q}`,
+      options,
+    );
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as UsageDistribution;
+  }
+
+  /** How the top users' share of usage moves month by month; carries no user ids. */
+  async usageConcentration(
+    query: UsageRange & {
+      measure?: "tokens" | "cost";
+      groupBy?: UsageGroupBy;
+      group?: string;
+      organization?: string;
+    } = {},
+    options: CallOptions = {},
+  ): Promise<UsageConcentration> {
+    const q = range(query);
+    narrow(q, query);
+    const body = await this.#call(
+      "GET",
+      `/v1/usage/concentration?${q}`,
+      options,
+    );
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as UsageConcentration;
   }
 
   listTaskTypes(options: CallOptions = {}) {

@@ -250,6 +250,38 @@ def test_usage_summary_sends_group_runs_and_range() -> None:
         )
 
 
+def test_usage_distribution_sends_measure_and_narrowing() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"users": 0, "total": "0", "data": []})
+
+    run(
+        handler,
+        lambda ai: ai.usage_distribution(
+            measure="cost", group_by="taskType", group="summarization"
+        ),
+    )
+    assert seen[0].url.path == "/v1/usage/distribution"
+    query = seen[0].url.params
+    assert query["measure"] == "cost"
+    assert query["groupBy"] == "taskType"
+    assert query["group"] == "summarization"
+
+
+def test_usage_concentration_sends_measure_to_its_path() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"data": []})
+
+    run(handler, lambda ai: ai.usage_concentration(measure="cost"))
+    assert seen[0].url.path == "/v1/usage/concentration"
+    assert seen[0].url.params["measure"] == "cost"
+
+
 def test_manages_task_types_and_domains() -> None:
     seen: list[httpx.Request] = []
 

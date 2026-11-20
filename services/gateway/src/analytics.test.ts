@@ -6,6 +6,7 @@ import {
   type Analytics,
   createAnalytics,
   type GroupBy,
+  parseMeasure,
   parseUsageQuery,
   type UsageQuery,
 } from "./analytics.js";
@@ -51,6 +52,7 @@ interface Event {
   firstTokenMs?: number | null;
   model?: string;
   application?: string;
+  unmetered?: boolean;
 }
 
 const insert = (e: Event) =>
@@ -58,7 +60,7 @@ const insert = (e: Event) =>
     `INSERT INTO usage_events (request_id, organization_id, application_id, subject_id,
        provider, model_id, price_book_version, input_tokens, output_tokens, cost, outcome,
        task_type, run_id, end_user, latency_ms, first_token_ms, time)
-     VALUES ($1, $2, $12, $3, 'bedrock', $4, 'test-v1', 10, 5, $5, 'measured',
+     VALUES ($1, $2, $12, $3, 'bedrock', $4, 'test-v1', $13::int, $13::int / 2, $5, 'measured',
        $6, $7, $8, $9, $10, $11)`,
     [
       `led_${randomUUID()}`,
@@ -73,6 +75,7 @@ const insert = (e: Event) =>
       e.firstTokenMs ?? null,
       e.time,
       e.application ?? "app",
+      e.unmetered ? null : 10,
     ],
   );
 
@@ -506,6 +509,246 @@ test("malformed windows, groups and run lists are refused", () => {
   }
 });
 
+const T = "2026-11-10T00:00:00Z";
+const share = (
+  d: { data: { topUsersPercent: number; share: number }[] },
+  p: number,
+) => d.data.find((x) => x.topUsersPercent === p)?.share;
+
+test(
+  "distribution shows how much of the spend the top users account for",
+  { skip },
+  async () => {
+    const o = org();
+    for (const [subject, cost] of [
+      ["a", "70"],
+      ["b", "20"],
+      ["c", "5"],
+      ["d", "5"],
+    ] as const) {
+      await insert({ organization: o, time: T, subject, endUser: true, cost });
+    }
+    const d = await analytics.distribution(
+      query({ groupBy: null, organization: o }),
+      "cost",
+    );
+    assert.equal(d.users, 4);
+    assert.equal(Number(d.total), 100);
+    assert.equal(d.data.length, 100);
+    assert.equal(share(d, 25), 0.7);
+    assert.equal(share(d, 50), 0.9);
+    assert.equal(share(d, 100), 1);
+  },
+);
+
+test(
+  "distribution counts only end users inside the window and organization",
+  { skip },
+  async () => {
+    const o = org();
+    await insert({
+      organization: o,
+      time: T,
+      subject: "a",
+      endUser: true,
+      cost: "10",
+    });
+    await insert({
+      organization: o,
+      time: T,
+      subject: "svc",
+      endUser: false,
+      cost: "900",
+    });
+    await insert({
+      organization: o,
+      time: "2026-10-01T00:00:00Z",
+      subject: "old",
+      endUser: true,
+      cost: "900",
+    });
+    await insert({
+      organization: org(),
+      time: T,
+      subject: "other",
+      endUser: true,
+      cost: "900",
+    });
+    const d = await analytics.distribution(
+      query({ groupBy: null, organization: o }),
+      "cost",
+    );
+    assert.equal(d.users, 1);
+    assert.equal(Number(d.total), 10);
+  },
+);
+
+test(
+  "distribution over tokens weighs each user by input and output tokens",
+  { skip },
+  async () => {
+    const o = org();
+    for (const subject of ["a", "a", "a", "b"]) {
+      await insert({ organization: o, time: T, subject, endUser: true });
+    }
+    const d = await analytics.distribution(
+      query({ groupBy: null, organization: o }),
+      "tokens",
+    );
+    assert.equal(Number(d.total), 60);
+    assert.equal(share(d, 50), 0.75);
+  },
+);
+
+test(
+  "distribution ranks users with no reported tokens last",
+  { skip },
+  async () => {
+    const o = org();
+    await insert({ organization: o, time: T, subject: "heavy", endUser: true });
+    for (const subject of ["x", "y"]) {
+      await insert({
+        organization: o,
+        time: T,
+        subject,
+        endUser: true,
+        unmetered: true,
+      });
+    }
+    const d = await analytics.distribution(
+      query({ groupBy: null, organization: o }),
+      "tokens",
+    );
+    assert.equal(d.users, 3);
+    assert.equal(share(d, 34), 1);
+  },
+);
+
+test(
+  "distribution keeps the same subject id in two applications apart",
+  { skip },
+  async () => {
+    const o = org();
+    for (const application of ["one", "two"]) {
+      await insert({
+        organization: o,
+        time: T,
+        subject: "u",
+        endUser: true,
+        application,
+      });
+    }
+    const d = await analytics.distribution(
+      query({ groupBy: null, organization: o }),
+      "tokens",
+    );
+    assert.equal(d.users, 2);
+  },
+);
+
+test("distribution narrows to one task type", { skip }, async () => {
+  const o = org();
+  await insert({
+    organization: o,
+    time: T,
+    subject: "a",
+    endUser: true,
+    taskType: "summarization",
+    cost: "4",
+  });
+  await insert({
+    organization: o,
+    time: T,
+    subject: "b",
+    endUser: true,
+    taskType: "analysis",
+    cost: "96",
+  });
+  const d = await analytics.distribution(
+    query({ groupBy: "taskType", group: "summarization", organization: o }),
+    "cost",
+  );
+  assert.equal(d.users, 1);
+  assert.equal(Number(d.total), 4);
+});
+
+test("distribution is empty when no end user called", { skip }, async () => {
+  const d = await analytics.distribution(
+    query({ groupBy: null, organization: org() }),
+    "cost",
+  );
+  assert.deepEqual(d, { users: 0, total: "0", data: [] });
+});
+
+test(
+  "concentration gives each month's top 5, 10 and 20 percent shares, adding a user's days together",
+  { skip },
+  async () => {
+    const o = org();
+    for (let i = 0; i < 20; i++) {
+      await insert({
+        organization: o,
+        time: T,
+        subject: `u${i}`,
+        endUser: true,
+        cost: i === 0 ? "40" : "1",
+      });
+    }
+    await insert({
+      organization: o,
+      time: "2026-11-15T00:00:00Z",
+      subject: "u0",
+      endUser: true,
+      cost: "41",
+    });
+    await insert({
+      organization: o,
+      time: "2026-10-20T00:00:00Z",
+      subject: "a",
+      endUser: true,
+      cost: "7",
+    });
+    const rows = await analytics.concentration(
+      query({
+        groupBy: null,
+        organization: o,
+        from: at("2026-10-01T00:00:00Z"),
+      }),
+      "cost",
+    );
+    assert.deepEqual(
+      rows.map((r) => [r.month, r.users]),
+      [
+        ["2026-10", 1],
+        ["2026-11", 20],
+      ],
+    );
+    assert.equal(rows[0]?.top5, 1);
+    assert.equal(rows[1]?.top5, 0.81);
+    assert.equal(rows[1]?.top10, 0.82);
+    assert.equal(rows[1]?.top20, 0.84);
+  },
+);
+
+test("concentration is empty when no end user called", { skip }, async () => {
+  assert.deepEqual(
+    await analytics.concentration(
+      query({ groupBy: null, organization: org() }),
+      "cost",
+    ),
+    [],
+  );
+});
+
+test("parseMeasure defaults to tokens and refuses an unknown measure", () => {
+  assert.equal(parseMeasure(new URL("http://x/")), "tokens");
+  assert.equal(parseMeasure(new URL("http://x/?measure=cost")), "cost");
+  assert.throws(
+    () => parseMeasure(new URL("http://x/?measure=drop")),
+    refused(400),
+  );
+});
+
 test(
   "the same subject id in two applications counts as two active users",
   { skip },
@@ -567,3 +810,22 @@ test("series reports a quiet day as zeros", { skip }, async () => {
     ],
   );
 });
+
+test(
+  "distribution and concentration are empty when end users used none of the measure",
+  { skip },
+  async () => {
+    const o = org();
+    await insert({
+      organization: o,
+      time: T,
+      subject: "a",
+      endUser: true,
+      cost: "0",
+    });
+    const q = query({ groupBy: null, organization: o });
+    const d = await analytics.distribution(q, "cost");
+    assert.deepEqual([d.users, d.total, d.data], [1, "0", []]);
+    assert.deepEqual(await analytics.concentration(q, "cost"), []);
+  },
+);
