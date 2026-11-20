@@ -7,7 +7,11 @@ import {
 } from "@bae6/ai-core";
 import pg from "pg";
 import { createAnalytics } from "./analytics.js";
-import { type ModelConfig, parseConfig } from "./config.js";
+import {
+  type ModelConfig,
+  nonAwsEndpointModels,
+  parseConfig,
+} from "./config.js";
 import {
   awsCredentials,
   awsSource,
@@ -58,16 +62,11 @@ const config = parseConfig(JSON.parse(rawConfig));
 
 // Signed requests carry real AWS credentials, so only AWS hosts are allowed outside development.
 const allowCustomEndpoints = devOnly("BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS");
-for (const m of config.models) {
-  if (
-    m.endpoint !== undefined &&
-    !new URL(m.endpoint).hostname.endsWith(".amazonaws.com") &&
-    !allowCustomEndpoints
-  ) {
-    throw new Error(
-      `model ${m.id}: endpoint is not an AWS host; needs BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS`,
-    );
-  }
+const foreignEndpoint = nonAwsEndpointModels(config)[0];
+if (foreignEndpoint !== undefined && !allowCustomEndpoints) {
+  throw new Error(
+    `model ${foreignEndpoint}: endpoint is not an AWS host; needs BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS`,
+  );
 }
 
 if (
@@ -127,7 +126,7 @@ const credentialStatus = () => [
     ? [
         {
           provider: "vertex" as const,
-          source: "metadata",
+          source: "metadata" as const,
           lastRefreshAgeSeconds: ageSeconds(gcpState),
         },
       ]
