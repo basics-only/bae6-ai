@@ -265,7 +265,6 @@ export function createAnalytics(pool: pg.Pool) {
       };
     },
 
-    // shortcut: each day rescans up to 30 days of events for active users; add a daily rollup if this is slow.
     async series(q: UsageQuery) {
       const params: unknown[] = [q.from, q.to];
       const extra: string[] = [];
@@ -277,33 +276,63 @@ export function createAnalytics(pool: pg.Pool) {
         params.push(q.group);
         extra.push(`${GROUPS[q.groupBy]} = $${params.length}`);
       }
-      const active = (hours: number) =>
-        `count(DISTINCT subject_id) FILTER (WHERE end_user AND t >= day_end - interval '${hours} hours')::int`;
+      const aligned = "days.day_end = days.day + interval '1 day'";
+      // A user is active on day d for a W-day window when they were active on any of d-W+1..d,
+      // so each user's active days cover W end-days each; the covered ranges are merged per
+      // user, and a running sum of range starts and ends gives the count for every day at once.
+      const cover = (w: number) => `
+        pieces_${w} AS (
+          SELECT CASE WHEN prev IS NULL OR p >= prev + interval '${w} days'
+                      THEN p ELSE prev + interval '${w} days' END AS s,
+                 p + interval '${w - 1} days' AS e
+          FROM (SELECT p, lag(p) OVER (PARTITION BY subject_id ORDER BY p) AS prev FROM pairs) x
+        ), edges_${w} AS (
+          SELECT d, sum(v) AS v FROM (
+            SELECT s AS d, 1 AS v FROM pieces_${w}
+            UNION ALL SELECT e + interval '1 day', -1 FROM pieces_${w}) x GROUP BY d
+        ), au_${w} AS (
+          SELECT g.day, sum(coalesce(edges_${w}.v, 0)) OVER (ORDER BY g.day) AS n
+          FROM calendar g(day) LEFT JOIN edges_${w} ON edges_${w}.d = g.day
+        )`;
+      const raw = (hours: number) =>
+        `count(DISTINCT subject_id) FILTER (WHERE t >= days.day_end - interval '${hours} hours')::int`;
+      // Windows end at midnight except on the last day, which is counted over raw events.
       const { rows } = await pool.query<MeasureRow & { day: string }>(
-        `WITH e AS (
+        `WITH e AS MATERIALIZED (
            SELECT time AT TIME ZONE 'UTC' AS t, subject_id, end_user, input_tokens,
              output_tokens, cost, latency_ms, first_token_ms
            FROM usage_events
            WHERE time >= $1::timestamptz - interval '720 hours' AND time < $2::timestamptz
              ${extra.map((c) => `AND ${c}`).join(" ")}
+         ), m AS (
+           SELECT date_trunc('day', t) AS d, ${aggregates("true")}
+           FROM e WHERE t >= $1::timestamptz AT TIME ZONE 'UTC' GROUP BY 1
+         ), pairs AS (
+           SELECT DISTINCT subject_id, date_trunc('day', t) AS p FROM e WHERE end_user
+         ), calendar AS (
+           SELECT generate_series(
+             date_trunc('day', ($1::timestamptz - interval '720 hours') AT TIME ZONE 'UTC'),
+             date_trunc('day', ($2::timestamptz AT TIME ZONE 'UTC') - interval '1 microsecond'),
+             interval '1 day')
          ), days AS (
-           SELECT d AS day, greatest(d, $1::timestamptz AT TIME ZONE 'UTC') AS day_start,
-             least(d + interval '1 day', $2::timestamptz AT TIME ZONE 'UTC') AS day_end
-           FROM generate_series(
-             date_trunc('day', $1::timestamptz AT TIME ZONE 'UTC'),
-             ($2::timestamptz AT TIME ZONE 'UTC') - interval '1 microsecond',
-             interval '1 day') d
-         )
-         SELECT to_char(day, 'YYYY-MM-DD') AS day, m.*, a.*
+           SELECT m.d AS day, least(m.d + interval '1 day', $2::timestamptz AT TIME ZONE 'UTC') AS day_end
+           FROM m
+         ), ${cover(1)}, ${cover(7)}, ${cover(30)}
+         SELECT to_char(days.day, 'YYYY-MM-DD') AS day, m.*,
+           (CASE WHEN ${aligned} THEN au_1.n ELSE r.au_day END)::int AS au_day,
+           (CASE WHEN ${aligned} THEN au_7.n ELSE r.au_week END)::int AS au_week,
+           (CASE WHEN ${aligned} THEN au_30.n ELSE r.au_month END)::int AS au_month
          FROM days
-         CROSS JOIN LATERAL (
-           SELECT ${aggregates("true")} FROM e WHERE t >= day_start AND t < day_end) m
-         CROSS JOIN LATERAL (
-           SELECT ${active(HOURS.day)} AS au_day, ${active(HOURS.week)} AS au_week,
-             ${active(HOURS.month)} AS au_month
-           FROM e WHERE t < day_end AND t >= day_end - interval '${HOURS.month} hours') a
-         WHERE m.requests > 0
-         ORDER BY day`,
+         JOIN m ON m.d = days.day
+         JOIN au_1 ON au_1.day = days.day
+         JOIN au_7 ON au_7.day = days.day
+         JOIN au_30 ON au_30.day = days.day
+         LEFT JOIN LATERAL (
+           SELECT ${raw(HOURS.day)} AS au_day, ${raw(HOURS.week)} AS au_week,
+             ${raw(HOURS.month)} AS au_month
+           FROM e WHERE NOT (${aligned}) AND end_user
+             AND t < days.day_end AND t >= days.day_end - interval '${HOURS.month} hours') r ON true
+         ORDER BY days.day`,
         params,
       );
       return rows.map((r) => ({ day: r.day, ...measures(r) }));

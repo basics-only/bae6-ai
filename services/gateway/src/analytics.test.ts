@@ -209,6 +209,35 @@ test(
 );
 
 test(
+  "series counts the last day's active users over the 24 hours before a mid-day end",
+  { skip },
+  async () => {
+    const o = org();
+    const user = (time: string, subject: string) =>
+      insert({ organization: o, time, subject, endUser: true, taskType: null });
+    await user("2026-11-11T20:00:00Z", "u2");
+    await user("2026-11-12T10:00:00Z", "u1");
+    await user("2026-11-12T13:00:00Z", "u3");
+
+    const days = await analytics.series(
+      query({
+        groupBy: null,
+        organization: o,
+        from: at("2026-11-11T00:00:00Z"),
+        to: at("2026-11-12T12:00:00Z"),
+      }),
+    );
+    assert.deepEqual(
+      days.map((d) => [d.day, d.requests, d.activeUsers.day]),
+      [
+        ["2026-11-11", 1, 1],
+        ["2026-11-12", 1, 2],
+      ],
+    );
+  },
+);
+
+test(
   "series gives one point per UTC day with calls, and clips the first day",
   {
     skip,
