@@ -50,12 +50,66 @@ test("rejects routes that name unknown models, collide with a model, or carry un
   assert.throws(() => parseConfig(withRoutes([route, route])), /collides/);
 });
 
+const withClassifier = (
+  classifier: unknown,
+  extra: Record<string, unknown> = {},
+  tiny: Record<string, unknown> = {},
+) => ({
+  ...config({}),
+  models: [
+    ...config({}).models,
+    { ...config({}).models[0], id: "tiny", ...tiny },
+  ],
+  priceBook: {
+    version: "t",
+    prices: {
+      m: { inputPerMTok: "1", outputPerMTok: "1" },
+      tiny: { inputPerMTok: "1", outputPerMTok: "1" },
+    },
+  },
+  routes: [{ ...route, classifier, ...extra }],
+});
+const tiers = { easy: "tiny", hard: "m" };
+
+test("accepts a classifier whose tiers map to chat models", () => {
+  const parsed = parseConfig(withClassifier({ model: "tiny", tiers }));
+  assert.equal(parsed.routes[0]?.classifier?.model, "tiny");
+});
+
+test("rejects classifiers that are malformed, name unknown models, or could expose prompts", () => {
+  for (const [classifier, extra, tiny] of [
+    [{ model: "nope", tiers }, {}, {}],
+    [{ model: "tiny", tiers: { only: "m" } }, {}, {}],
+    [{ model: "tiny", tiers: { Easy: "tiny", hard: "m" } }, {}, {}],
+    [{ model: "tiny", tiers: { easy: "tiny", hard: "nope" } }, {}, {}],
+    [{ model: "tiny", tiers, prompt: "be nice" }, {}, {}],
+    [{ model: "tiny", tiers }, {}, { operations: ["embed"] }],
+    [{ model: "tiny", tiers }, {}, { organizations: ["acme"] }],
+    [
+      { model: "tiny", tiers },
+      { organizations: ["acme", "globex"] },
+      { organizations: ["acme"] },
+    ],
+  ] as const) {
+    assert.throws(
+      () => parseConfig(withClassifier(classifier, extra, tiny)),
+      /route|invalid/,
+    );
+  }
+  const scoped = withClassifier(
+    { model: "tiny", tiers },
+    { organizations: ["acme"] },
+    { organizations: ["acme", "globex"] },
+  );
+  assert.equal(parseConfig(scoped).routes.length, 1);
+});
+
 test("rejects a route to a model that cannot chat", () => {
   const embedOnly = { ...config({ operations: ["embed"] }), routes: [route] };
   assert.throws(() => parseConfig(embedOnly), /invalid default/);
 });
 
-const hf =(extra: Record<string, unknown> = {}) =>
+const hf = (extra: Record<string, unknown> = {}) =>
   config({
     provider: "huggingface",
     providerModel: "meta-llama/Llama-3.1-8B-Instruct",

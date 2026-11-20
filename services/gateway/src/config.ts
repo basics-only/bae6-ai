@@ -37,11 +37,19 @@ export interface RouteRule {
   images?: boolean;
 }
 
+export interface ClassifierConfig {
+  model: string;
+  /** Tier name to model, easiest first. */
+  tiers: Record<string, string>;
+}
+
 export interface RouteConfig {
   id: string;
   default: string;
   /** First match wins. */
   rules: RouteRule[];
+  /** Asked only when no rule matched. */
+  classifier?: ClassifierConfig;
   /** Organizations allowed to use the route; absent means all. */
   organizations?: string[];
 }
@@ -240,7 +248,16 @@ export function parseConfig(raw: unknown): GatewayConfig {
 
 const MAX_ROUTES = 32;
 const MAX_RULES = 16;
-const ROUTE_KEYS = new Set(["id", "default", "rules", "organizations"]);
+const MIN_TIERS = 2;
+const MAX_TIERS = 8;
+const TIER = /^[a-z][a-z0-9_-]{0,15}$/;
+const ROUTE_KEYS = new Set([
+  "id",
+  "default",
+  "rules",
+  "classifier",
+  "organizations",
+]);
 const RULE_KEYS = new Set([
   "model",
   "minInputTokens",
@@ -303,6 +320,28 @@ function parseRoutes(
         !r.organizations.every((o) => typeof o === "string" && SLUG.test(o)))
     )
       bad("organizations");
+    if (r.classifier !== undefined) {
+      const c = r.classifier;
+      if (!isObject(c) || !isObject(c.tiers)) return bad("classifier");
+      for (const k of Object.keys(c)) {
+        if (k !== "model" && k !== "tiers") bad(`classifier.${k}`);
+      }
+      chatModel(c.model, "classifier.model");
+      const classifier = byId.get(c.model as string) as ModelConfig;
+      if (!classifier.inputModalities.includes("text")) bad("classifier.model");
+      const tiers = Object.entries(c.tiers);
+      if (tiers.length < MIN_TIERS || tiers.length > MAX_TIERS)
+        bad("classifier.tiers");
+      for (const [tier, model] of tiers) {
+        if (!TIER.test(tier)) bad("classifier.tiers");
+        chatModel(model, `classifier.tiers.${tier}`);
+      }
+      // The classifier sees prompts, so no organization may reach it that cannot use its model.
+      const allowed = classifier.organizations;
+      const orgs = r.organizations as string[] | undefined;
+      if (allowed && (!orgs || !orgs.every((o) => allowed.includes(o))))
+        bad("classifier.model (route organizations are not a subset of its)");
+    }
     return r as unknown as RouteConfig;
   });
 }

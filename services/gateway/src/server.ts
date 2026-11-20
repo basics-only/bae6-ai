@@ -14,7 +14,14 @@ import {
   UnsupportedOperation,
   type Usage,
 } from "@bae6/ai-core";
-import type { ModelConfig, RouteConfig } from "./config.js";
+import {
+  CLASSIFIER_MAX_TOKENS,
+  CLASSIFIER_TIMEOUT_MS,
+  classifierInputTokens,
+  classifierMessages,
+  parseTier,
+} from "./classifier.js";
+import type { ClassifierConfig, ModelConfig, RouteConfig } from "./config.js";
 import { type Feedback, parseFeedback } from "./feedback.js";
 import { envelope, HttpError, readBody, send } from "./http.js";
 import { type Identity, identify, type Verifier } from "./identity.js";
@@ -27,7 +34,7 @@ import {
   parseEmbeddings,
   usageChunk,
 } from "./openai.js";
-import { pick } from "./routing.js";
+import { pickRoute } from "./routing.js";
 
 export interface GatewayModel {
   config: ModelConfig;
@@ -218,7 +225,7 @@ export function createGateway(deps: GatewayDeps) {
     key: string | undefined,
     sha256: string,
     inputTokens: number,
-    choose: () => Chosen,
+    choose: () => Promise<Chosen>,
   ): Promise<{ ledgerId: string; chosen: Chosen } | null> {
     const caller = callerOf(who);
     const ledgerId = `led_${randomUUID()}`;
@@ -260,9 +267,10 @@ export function createGateway(deps: GatewayDeps) {
       }
       let chosen: Chosen;
       try {
-        chosen = choose();
+        chosen = await choose();
       } catch (err) {
-        if (key) await ledger.release(caller, key);
+        // Anything else is released once, by the outer handler.
+        if (key && err instanceof HttpError) await ledger.release(caller, key);
         throw err;
       }
       const { model } = chosen;
@@ -380,7 +388,59 @@ export function createGateway(deps: GatewayDeps) {
       if (err) throw err;
       return { model, maxTokens: maxTokensFor(model.config, input) };
     };
-    const routed = (r: RouteConfig): Chosen => {
+    const classify = async (
+      r: RouteConfig,
+      c: ClassifierConfig,
+    ): Promise<string | null> => {
+      const m = models.get(c.model);
+      const limit = deps.budgets[who.organizationId];
+      const tiers = Object.keys(c.tiers);
+      const messages = classifierMessages(input.messages, tiers);
+      if (
+        !m ||
+        !mayUse(m.config, who.organizationId) ||
+        limit === undefined ||
+        !messages
+      )
+        return null;
+      const requestId = `led_${randomUUID()}`;
+      const estimate = await ledger.reserve({
+        requestId,
+        caller: callerOf(who),
+        limit,
+        provider: m.config.provider,
+        modelId: m.config.id,
+        inputTokens: classifierInputTokens(messages),
+        maxOutputTokens: CLASSIFIER_MAX_TOKENS,
+        leaseMs: CLASSIFIER_TIMEOUT_MS + 60_000,
+        route: { id: r.id, decision: "classifier" },
+      });
+      if (estimate === null) return null;
+      let text: string | null = null;
+      let outcome: Outcome;
+      try {
+        const out = await m.provider.chat({
+          messages,
+          maxTokens: CLASSIFIER_MAX_TOKENS,
+          temperature: 0,
+          signal: AbortSignal.timeout(
+            Math.min(CLASSIFIER_TIMEOUT_MS, deps.timeoutMs),
+          ),
+        });
+        text = out.text;
+        outcome = { kind: "measured", usage: out.usage };
+      } catch (err) {
+        outcome = outcomeOf(err);
+        log({
+          msg: "classifier_failed",
+          route: r.id,
+          error: (err as Error).name,
+        });
+      }
+      await finalize(requestId, outcome);
+      return text === null ? null : parseTier(text, tiers);
+    };
+    const routed = async (r: RouteConfig): Promise<Chosen> => {
       const usable = (id: string) => {
         const m = models.get(id);
         return (
@@ -393,7 +453,12 @@ export function createGateway(deps: GatewayDeps) {
       const hasImages = input.messages.some((m) =>
         m.content.some((p) => p.type === "image"),
       );
-      const c = pick(r, { inputTokens: input.inputTokens, hasImages }, usable);
+      const c = await pickRoute(
+        r,
+        { inputTokens: input.inputTokens, hasImages },
+        usable,
+        (cl) => classify(r, cl),
+      );
       if (!c) {
         throw new HttpError(
           400,
@@ -423,7 +488,7 @@ export function createGateway(deps: GatewayDeps) {
       key,
       sha256,
       input.inputTokens,
-      first ? () => first : () => routed(route as RouteConfig),
+      first ? async () => first : () => routed(route as RouteConfig),
     );
     if (started === null) return;
     const { ledgerId, chosen } = started;
@@ -548,7 +613,7 @@ export function createGateway(deps: GatewayDeps) {
       key,
       sha256,
       input.inputTokens,
-      () => ({ model, maxTokens: 0 }),
+      async () => ({ model, maxTokens: 0 }),
     );
     if (started === null) return;
     const { ledgerId } = started;
