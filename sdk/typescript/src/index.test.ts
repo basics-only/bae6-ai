@@ -97,6 +97,16 @@ test("a mid-stream error surfaces as an API error", async () => {
   assert.equal(err.requestId, "r1");
 });
 
+test("reads credential status and rejects a malformed answer", async () => {
+  const data = [
+    { provider: "bedrock", source: "web-identity", lastRefreshAgeSeconds: 3 },
+  ];
+  reply = json(200, { data });
+  assert.deepEqual(await ai.credentials(), data);
+  reply = json(200, {});
+  await assert.rejects(ai.credentials(), AiApiError);
+});
+
 test("maps budget, auth and throttling errors", async () => {
   reply = json(402, { code: "budget_exceeded", message: "no", requestId: "r" });
   await assert.rejects(ai.chat(req), AiBudgetError);

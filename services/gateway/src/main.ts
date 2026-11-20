@@ -11,7 +11,13 @@ import {
   nonAwsEndpointModels,
   parseConfig,
 } from "./config.js";
-import { awsCredentials, gcpToken } from "./credentials.js";
+import {
+  awsCredentials,
+  awsSource,
+  gcpToken,
+  hasCloudIdentity,
+  type RefreshState,
+} from "./credentials.js";
 import { createFeedback } from "./feedback.js";
 import { createVerifier, type Issuer } from "./identity.js";
 import { createLedger } from "./ledger.js";
@@ -62,6 +68,16 @@ if (foreignEndpoint !== undefined && !allowCustomEndpoints) {
   );
 }
 
+if (
+  config.models.some((m) => m.provider === "bedrock") &&
+  !hasCloudIdentity(env) &&
+  env.NODE_ENV !== "development"
+) {
+  throw new Error(
+    "Bedrock models need EKS Pod Identity (AWS_CONTAINER_CREDENTIALS_FULL_URI) or web identity (AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE); static AWS keys require NODE_ENV=development",
+  );
+}
+
 const port = int("PORT", 8080, 1, 65535);
 const timeoutMs = int("BAE6_PROVIDER_TIMEOUT_MS", 60_000, 1000, 300_000);
 const maxInflight = int("BAE6_MAX_INFLIGHT", 64, 1, 10_000);
@@ -86,8 +102,34 @@ const descriptor = (m: ModelConfig): ModelDescriptor => ({
   attributes: { provider: m.provider, inputModalities: m.inputModalities },
 });
 
-const aws = awsCredentials(env);
-const gcp = gcpToken(env);
+const awsState: RefreshState = {};
+const gcpState: RefreshState = {};
+const aws = awsCredentials(env, awsState);
+const gcp = gcpToken(env, gcpState);
+const ageSeconds = (s: RefreshState) =>
+  s.lastRefresh === undefined
+    ? null
+    : Math.floor((Date.now() - s.lastRefresh) / 1000);
+const credentialStatus = () => [
+  ...(config.models.some((m) => m.provider === "bedrock")
+    ? [
+        {
+          provider: "bedrock" as const,
+          source: awsSource(env),
+          lastRefreshAgeSeconds: ageSeconds(awsState),
+        },
+      ]
+    : []),
+  ...(config.models.some((m) => m.provider === "vertex")
+    ? [
+        {
+          provider: "vertex" as const,
+          source: "metadata",
+          lastRefreshAgeSeconds: ageSeconds(gcpState),
+        },
+      ]
+    : []),
+];
 const models = new Map<string, GatewayModel>(
   config.models.map((m) => {
     const provider: ModelProvider =
@@ -130,6 +172,7 @@ const feedback = createFeedback(pool);
 const feedbackRetentionDays = int("BAE6_FEEDBACK_RETENTION_DAYS", 90, 1, 3650);
 
 const server = createGateway({
+  credentials: credentialStatus,
   verify: createVerifier(issuers, { allowHttpJwks }),
   ledger,
   feedback,

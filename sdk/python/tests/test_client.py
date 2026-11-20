@@ -139,6 +139,13 @@ def test_usage_rejects_a_naive_datetime_and_read_calls_send_the_end_user_token()
     assert seen[0].url.params["from"] == "2026-01-01T00:00:00+00:00"
 
 
+def test_reads_credential_status_and_rejects_a_malformed_answer() -> None:
+    data = [{"provider": "bedrock", "source": "web-identity", "lastRefreshAgeSeconds": 3}]
+    assert run(lambda _: httpx.Response(200, json={"data": data}), lambda ai: ai.credentials()) == data
+    with pytest.raises(AiApiError):
+        run(lambda _: httpx.Response(200, json={}), lambda ai: ai.credentials())
+
+
 def test_submits_feedback_and_pages_through_the_listing() -> None:
     seen: list[httpx.Request] = []
 
