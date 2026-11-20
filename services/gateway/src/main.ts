@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import {
   bedrockProvider,
+  huggingfaceProvider,
   type ModelDescriptor,
   type ModelProvider,
   vertexProvider,
@@ -53,6 +54,7 @@ const config = parseConfig(JSON.parse(rawConfig));
 const allowCustomEndpoints = devOnly("BAE6_ALLOW_CUSTOM_PROVIDER_ENDPOINTS");
 for (const m of config.models) {
   if (
+    m.provider === "bedrock" &&
     m.endpoint !== undefined &&
     !new URL(m.endpoint).hostname.endsWith(".amazonaws.com") &&
     !allowCustomEndpoints
@@ -84,8 +86,18 @@ const descriptor = (m: ModelConfig): ModelDescriptor => ({
     maxInputTokens: m.maxInputTokens,
     maxOutputTokens: m.maxOutputTokens,
   },
-  attributes: { provider: m.provider, inputModalities: m.inputModalities },
+  attributes: {
+    provider: m.provider,
+    inputModalities: m.inputModalities,
+    ...(m.hosting === undefined ? {} : { hosting: m.hosting }),
+  },
 });
+
+function huggingfaceToken(m: ModelConfig): string {
+  const token = env[m.tokenEnv as string];
+  if (!token) throw new Error(`model ${m.id}: ${m.tokenEnv} is not set`);
+  return token;
+}
 
 const aws = awsCredentials(env);
 const gcp = gcpToken(env);
@@ -96,17 +108,24 @@ const models = new Map<string, GatewayModel>(
         ? bedrockProvider({
             descriptor: descriptor(m),
             modelId: m.providerModel,
-            region: m.region,
+            region: m.region as string,
             credentials: aws,
             ...(m.endpoint === undefined ? {} : { endpoint: m.endpoint }),
           })
-        : vertexProvider({
-            descriptor: descriptor(m),
-            model: m.providerModel,
-            project: m.project as string,
-            region: m.region,
-            token: gcp,
-          });
+        : m.provider === "huggingface"
+          ? huggingfaceProvider({
+              descriptor: descriptor(m),
+              model: m.providerModel,
+              token: huggingfaceToken(m),
+              ...(m.endpoint === undefined ? {} : { endpoint: m.endpoint }),
+            })
+          : vertexProvider({
+              descriptor: descriptor(m),
+              model: m.providerModel,
+              project: m.project as string,
+              region: m.region as string,
+              token: gcp,
+            });
     return [m.id, { config: m, provider }];
   }),
 );

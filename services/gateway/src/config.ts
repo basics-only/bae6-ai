@@ -1,15 +1,27 @@
-import type { Modality, Operation } from "@bae6/ai-core";
+import {
+  huggingfaceOrigin,
+  type Modality,
+  type Operation,
+} from "@bae6/ai-core";
 import { SLUG } from "./identity.js";
 
 export interface ModelConfig {
   id: string;
-  provider: "bedrock" | "vertex";
+  provider: "bedrock" | "vertex" | "huggingface";
   providerModel: string;
-  region: string;
+  /** Bedrock and Vertex only. */
+  region?: string;
   /** Vertex only. */
   project?: string;
-  /** Bedrock only. Replaces the AWS host; for mocks and private endpoints. */
+  /**
+   * Bedrock: replaces the AWS host; for mocks and private endpoints.
+   * Hugging Face: the dedicated endpoint's origin.
+   */
   endpoint?: string;
+  /** Hugging Face only. Inference Providers sends prompts to third-party hosts. */
+  hosting?: "inference-providers" | "dedicated";
+  /** Hugging Face only. The environment variable holding the access token. */
+  tokenEnv?: string;
   operations: Operation[];
   inputModalities: Modality[];
   maxInputTokens: number;
@@ -32,6 +44,7 @@ const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const DECIMAL = /^\d{1,12}(\.\d{1,9})?$/;
 const REGION = /^[a-z0-9-]{1,32}$/;
 const PROJECT = /^[a-z][a-z0-9-]{4,29}$/;
+const HF_TOKEN_ENV = /^BAE6_HF_TOKEN_[A-Z0-9_]{1,32}$/;
 const PROVIDER_MODEL = /^[A-Za-z0-9._:@/-]{1,128}$/;
 const OPERATIONS = new Set(["chat", "chat_stream", "embed"]);
 const MODALITIES = new Set(["text", "image"]);
@@ -103,19 +116,53 @@ export function parseConfig(raw: unknown): GatewayConfig {
       fail(`model id ${id} is invalid or repeated`);
     seen.add(id);
     const bad = (field: string): never => fail(`model ${id}: invalid ${field}`);
-    if (m.provider !== "bedrock" && m.provider !== "vertex") bad("provider");
+    if (
+      m.provider !== "bedrock" &&
+      m.provider !== "vertex" &&
+      m.provider !== "huggingface"
+    )
+      bad("provider");
+    const hf = m.provider === "huggingface";
     if (
       typeof m.providerModel !== "string" ||
       !PROVIDER_MODEL.test(m.providerModel)
     )
       bad("providerModel");
-    if (typeof m.region !== "string" || !REGION.test(m.region)) bad("region");
+    if (
+      hf
+        ? m.region !== undefined
+        : typeof m.region !== "string" || !REGION.test(m.region)
+    )
+      bad("region");
     if (
       m.provider === "vertex" &&
       (typeof m.project !== "string" || !PROJECT.test(m.project))
     )
       bad("project");
-    if (m.endpoint !== undefined) {
+    if (!hf && (m.hosting !== undefined || m.tokenEnv !== undefined))
+      bad("hosting or tokenEnv");
+    if (hf) {
+      if (m.hosting !== "inference-providers" && m.hosting !== "dedicated")
+        bad("hosting");
+      if (typeof m.tokenEnv !== "string" || !HF_TOKEN_ENV.test(m.tokenEnv))
+        bad("tokenEnv");
+      // Only a dedicated endpoint names a host; Inference Providers is always the router.
+      const origin = huggingfaceOrigin(m.endpoint);
+      if ((m.hosting === "dedicated") !== (m.endpoint !== undefined)) {
+        bad("endpoint");
+      }
+      if (m.endpoint !== undefined) {
+        if (origin === null || origin === "https://router.huggingface.co")
+          bad("endpoint");
+        m.endpoint = origin;
+      }
+      // Prompts leave for third-party hosts, so an unlisted model must not be open to everyone.
+      if (
+        m.hosting === "inference-providers" &&
+        (!Array.isArray(m.organizations) || m.organizations.length === 0)
+      )
+        bad("organizations (required for inference-providers)");
+    } else if (m.endpoint !== undefined) {
       const url = bedrockEndpoint(m.endpoint);
       if (m.provider !== "bedrock" || url === null) bad("endpoint");
       // Keep the normalized origin so later checks see what will really be called.
@@ -125,7 +172,8 @@ export function parseConfig(raw: unknown): GatewayConfig {
     if (
       !Array.isArray(ops) ||
       ops.length === 0 ||
-      !ops.every((o) => OPERATIONS.has(o))
+      !ops.every((o) => OPERATIONS.has(o)) ||
+      (hf && ops.includes("embed"))
     )
       bad("operations");
     const mods = m.inputModalities;

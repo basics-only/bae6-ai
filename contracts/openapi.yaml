@@ -370,7 +370,9 @@ components:
             properties:
               id: { type: string }
               object: { const: model }
-              owned_by: { enum: [bedrock, vertex] }
+              owned_by:
+                description: Unknown values may appear in later versions; clients tolerate them.
+                enum: [bedrock, vertex, huggingface]
               capabilities:
                 $ref: "./vendor/schemas/capability-descriptor.json"
     ContentPart:

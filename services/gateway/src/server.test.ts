@@ -258,6 +258,14 @@ test("a provider throttle tells the client when to retry", async () => {
   assert.equal(res.headers.get("retry-after"), "2");
 });
 
+test("a model that is still starting is a 503 the client retries, not a provider failure", async () => {
+  fail = new ProviderError("x", "no", 503);
+  const res = await post("acme", hi);
+  fail = undefined;
+  assert.equal(res.status, 503);
+  assert.equal(res.headers.get("retry-after"), "5");
+});
+
 test("streams OpenAI chunks with usage and finalizes once", async () => {
   finalized.length = 0;
   const res = await post("acme", {

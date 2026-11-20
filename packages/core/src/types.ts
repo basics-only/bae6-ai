@@ -7,7 +7,11 @@ export interface ModelDescriptor {
   id: string;
   operations: Operation[];
   limits: { maxInputTokens: number; maxOutputTokens: number };
-  attributes: { provider: "bedrock" | "vertex"; inputModalities: Modality[] };
+  attributes: {
+    provider: "bedrock" | "vertex" | "huggingface";
+    inputModalities: Modality[];
+    hosting?: "inference-providers" | "dedicated";
+  };
 }
 
 export type ContentPart =
