@@ -511,3 +511,12 @@ test("one organization's feedback writes are limited without affecting another",
   ratable.set("led_00000000-0000-0000-0000-111111111111", "acme");
   assert.equal((await rate("rater", v)).status, 200);
 });
+
+test("credential status lists only providers the caller's organization has a model on", async () => {
+  const res = await call("GET", "/v1/credentials", "reader");
+  const { data } = (await res.json()) as { data: { provider: string }[] };
+  assert.deepEqual(
+    data.map((c) => c.provider),
+    ["bedrock"],
+  );
+});
