@@ -268,3 +268,17 @@ def test_manages_task_types_and_domains() -> None:
         ("DELETE", "/v1/domains/legal"),
     ]
     assert json.loads(seen[1].content) == {"name": "Legal"}
+
+
+def test_encodes_tag_ids_in_the_path() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    async def call(ai: Ai):
+        await ai.delete_domain("a/b?c")
+
+    run(handler, call)
+    assert seen[0].url.raw_path == b"/v1/domains/a%2Fb%3Fc"

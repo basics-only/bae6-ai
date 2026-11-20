@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from types import TracebackType
 from typing import Any, Self
+from urllib.parse import quote
 
 import httpx
 
@@ -399,14 +400,24 @@ class Ai:
     ) -> None:
         """Past usage keeps the id; new calls tagged with it are refused."""
         await self._call(
-            "DELETE", f"/v1/task-types/{id}", end_user_token, None, None, empty=True
+            "DELETE",
+            f"/v1/task-types/{quote(id, safe='')}",
+            end_user_token,
+            None,
+            None,
+            empty=True,
         )
 
     async def delete_domain(
         self, id: str, *, end_user_token: str | None = None
     ) -> None:
         await self._call(
-            "DELETE", f"/v1/domains/{id}", end_user_token, None, None, empty=True
+            "DELETE",
+            f"/v1/domains/{quote(id, safe='')}",
+            end_user_token,
+            None,
+            None,
+            empty=True,
         )
 
     async def _list_tags(
@@ -421,7 +432,11 @@ class Ai:
         self, kind: str, id: str, name: str, end_user_token: str | None
     ) -> dict[str, Any]:
         body = await self._call(
-            "PUT", f"/v1/{kind}/{id}", end_user_token, None, {"name": name}
+            "PUT",
+            f"/v1/{kind}/{quote(id, safe='')}",
+            end_user_token,
+            None,
+            {"name": name},
         )
         if not isinstance(body.get("id"), str):
             raise _invalid_response()
