@@ -246,3 +246,45 @@ test("agent runs go to the worker and accept its 202", async () => {
     /agentRunsUrl is not configured/,
   );
 });
+
+test("eval runs go to the eval worker and accept its 202", async () => {
+  const run = {
+    id: "eval_00000000-0000-0000-0000-000000000000",
+    status: "queued",
+    scorers: ["exact"],
+  };
+  const worker = new Ai({
+    baseUrl: "http://127.0.0.1:1",
+    evalRunsUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/`,
+    credentials: "svc-token",
+  });
+  const request = {
+    name: "smoke",
+    datasetVersion: "1",
+    model: "m",
+    cases: [{ id: "a", input: "1+1", expected: "2" }],
+  };
+  reply = json(202, run);
+  const made = await worker.createEvalRun(request, {
+    idempotencyKey: "key-00001",
+  });
+  assert.equal(seenUrl, "POST /v1/eval-runs");
+  assert.equal(seen["idempotency-key"], "key-00001");
+  assert.equal(made.status, "queued");
+
+  reply = json(200, run);
+  await worker.getEvalRun(made.id);
+  assert.equal(seenUrl, `GET /v1/eval-runs/${made.id}`);
+  await worker.cancelEvalRun(made.id);
+  assert.equal(seenUrl, `POST /v1/eval-runs/${made.id}/cancel`);
+
+  reply = json(200, { data: [], nextCursor: null });
+  await worker.listEvalRuns({ status: "finished", limit: 5 });
+  assert.equal(seenUrl, "GET /v1/eval-runs?status=finished&limit=5");
+
+  await assert.rejects(
+    worker.getAgentRun(made.id),
+    /agentRunsUrl is not configured/,
+  );
+  await assert.rejects(ai.getEvalRun(made.id), /evalRunsUrl is not configured/);
+});

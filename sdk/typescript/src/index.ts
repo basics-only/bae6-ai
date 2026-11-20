@@ -6,6 +6,8 @@ export interface AiOptions {
   timeoutMs?: number;
   /** The agent-worker's address; needed only for the agent run methods. */
   agentRunsUrl?: string;
+  /** The eval-worker's address; needed only for the eval run methods. */
+  evalRunsUrl?: string;
 }
 
 export interface CallOptions {
@@ -164,6 +166,72 @@ export interface AgentRun {
   receipts: Receipt[];
 }
 
+export type EvalScorer = "exact" | "contains";
+
+export interface EvalCaseInput {
+  id: string;
+  /** At most 4000 characters. */
+  input: string;
+  /** At most 1000 characters. */
+  expected: string;
+}
+
+export interface EvalRunRequest {
+  name: string;
+  datasetVersion: string;
+  model: string;
+  /** At most the deployment's case ceiling, with unique ids. */
+  cases: EvalCaseInput[];
+  /** Defaults to `["exact"]`. */
+  scorers?: EvalScorer[];
+}
+
+export interface EvalCaseResult {
+  id: string;
+  status: "ok" | "error" | "timeout";
+  scores: Record<string, number>;
+  latencyMs: number;
+  cost: number | null;
+  /** Untrusted. */
+  error?: string;
+}
+
+export interface EvalReport {
+  runId: string;
+  dataset: { name: string; version: string };
+  seed: number;
+  startedAt: string;
+  cases: EvalCaseResult[];
+  mean: Record<string, number>;
+  failures: number;
+  costKnown: boolean;
+  totalCost: number | null;
+}
+
+export interface EvalRun {
+  id: string;
+  status: RunStatus;
+  model: string;
+  name: string;
+  datasetVersion: string;
+  caseCount: number;
+  scorers: EvalScorer[];
+  submitterId: string;
+  attempt: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** Set once `status` is `finished`; `complete` is the only success. */
+  stop: "complete" | "aborted" | "model_error" | "abandoned" | null;
+  summary: {
+    cases: number;
+    failures: number;
+    mean: Record<string, number>;
+  } | null;
+  /** Null in a list; read the run for its report. */
+  report: EvalReport | null;
+}
+
 export class AiError extends Error {
   readonly requestId: string | undefined;
   constructor(message: string, requestId?: string, options?: ErrorOptions) {
@@ -265,14 +333,19 @@ async function* lines(body: ReadableStream<Uint8Array>, onData: () => void) {
   if (buffered) yield buffered.replace(/\r$/, "");
 }
 
+type WorkerUrl = "agentRunsUrl" | "evalRunsUrl";
+
 export class Ai {
   readonly #baseUrl: string;
   readonly #credentials: string;
   readonly #timeoutMs: number;
-  readonly #agentRunsUrl: string | undefined;
+  readonly #workerUrls: Record<WorkerUrl, string | undefined>;
 
   constructor(options: AiOptions) {
-    this.#agentRunsUrl = options.agentRunsUrl?.replace(/\/+$/, "");
+    this.#workerUrls = {
+      agentRunsUrl: options.agentRunsUrl?.replace(/\/+$/, ""),
+      evalRunsUrl: options.evalRunsUrl?.replace(/\/+$/, ""),
+    };
     this.#baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.#credentials = options.credentials;
     this.#timeoutMs = options.timeoutMs ?? 120_000;
@@ -423,7 +496,13 @@ export class Ai {
     options: CallOptions = {},
   ): Promise<AgentRun> {
     return this.#agentRun(
-      await this.#call("POST", "/v1/agent-runs", options, request, true),
+      await this.#call(
+        "POST",
+        "/v1/agent-runs",
+        options,
+        request,
+        "agentRunsUrl",
+      ),
     );
   }
 
@@ -435,7 +514,7 @@ export class Ai {
         `/v1/agent-runs/${encodeURIComponent(id)}`,
         options,
         undefined,
-        true,
+        "agentRunsUrl",
       ),
     );
   }
@@ -454,7 +533,7 @@ export class Ai {
       `/v1/agent-runs?${q}`,
       options,
       undefined,
-      true,
+      "agentRunsUrl",
     );
     if (!Array.isArray(body.data)) throw invalidResponse();
     return body as unknown as { data: AgentRun[]; nextCursor: string | null };
@@ -471,7 +550,69 @@ export class Ai {
         `/v1/agent-runs/${encodeURIComponent(id)}/cancel`,
         options,
         undefined,
-        true,
+        "agentRunsUrl",
+      ),
+    );
+  }
+
+  /** Queues an eval run (202); a repeat with the same `idempotencyKey` returns the first run. Needs `eval-runs:write`. */
+  async createEvalRun(
+    request: EvalRunRequest,
+    options: CallOptions = {},
+  ): Promise<EvalRun> {
+    return this.#evalRun(
+      await this.#call(
+        "POST",
+        "/v1/eval-runs",
+        options,
+        request,
+        "evalRunsUrl",
+      ),
+    );
+  }
+
+  /** Poll until `status` is `finished` or `cancelled`. Needs `eval-runs:read`. */
+  async getEvalRun(id: string, options: CallOptions = {}): Promise<EvalRun> {
+    return this.#evalRun(
+      await this.#call(
+        "GET",
+        `/v1/eval-runs/${encodeURIComponent(id)}`,
+        options,
+        undefined,
+        "evalRunsUrl",
+      ),
+    );
+  }
+
+  /** One page of the organization's eval runs, newest first, without reports. Needs `eval-runs:read`. */
+  async listEvalRuns(
+    page: { status?: RunStatus; limit?: number; cursor?: string } = {},
+    options: CallOptions = {},
+  ) {
+    const q = new URLSearchParams();
+    if (page.status !== undefined) q.set("status", page.status);
+    if (page.limit !== undefined) q.set("limit", String(page.limit));
+    if (page.cursor !== undefined) q.set("cursor", page.cursor);
+    const body = await this.#call(
+      "GET",
+      `/v1/eval-runs?${q}`,
+      options,
+      undefined,
+      "evalRunsUrl",
+    );
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as { data: EvalRun[]; nextCursor: string | null };
+  }
+
+  /** A queued run is cancelled at once; a running one stops within seconds. Needs `eval-runs:write`. */
+  async cancelEvalRun(id: string, options: CallOptions = {}): Promise<EvalRun> {
+    return this.#evalRun(
+      await this.#call(
+        "POST",
+        `/v1/eval-runs/${encodeURIComponent(id)}/cancel`,
+        options,
+        undefined,
+        "evalRunsUrl",
       ),
     );
   }
@@ -483,18 +624,25 @@ export class Ai {
     return body as unknown as AgentRun;
   }
 
+  #evalRun(body: Json): EvalRun {
+    if (typeof body.id !== "string" || !Array.isArray(body.scorers)) {
+      throw invalidResponse();
+    }
+    return body as unknown as EvalRun;
+  }
+
   async #call(
     method: string,
     path: string,
     options: CallOptions,
     payload?: unknown,
-    agentRuns = false,
+    worker?: WorkerUrl,
   ) {
-    const base = agentRuns ? this.#agentRunsUrl : this.#baseUrl;
-    if (base === undefined) throw new AiError("agentRunsUrl is not configured");
+    const base = worker ? this.#workerUrls[worker] : this.#baseUrl;
+    if (base === undefined) throw new AiError(`${worker} is not configured`);
     const res = await this.#fetch(method, path, options, payload, base);
     const parsed = parseJson(await this.#text(res));
-    if (res.status !== 200 && !(agentRuns && res.status === 202)) {
+    if (res.status !== 200 && !(worker && res.status === 202)) {
       throw httpError(res.status, parsed);
     }
     if (!isObject(parsed)) throw invalidResponse();

@@ -21,13 +21,14 @@ USAGE = {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
 TOKEN = "SECRET\nX"
 
 
-def run(handler, call, agent_runs_url="http://worker/"):
+def run(handler, call, agent_runs_url="http://worker/", eval_runs_url="http://evals/"):
     async def go():
         async with Ai(
             "http://gw",
             "svc-token",
             transport=httpx.MockTransport(handler),
             agent_runs_url=agent_runs_url,
+            eval_runs_url=eval_runs_url,
         ) as ai:
             return await call(ai)
 
@@ -210,3 +211,47 @@ def test_agent_runs_go_to_the_worker_and_accept_its_202() -> None:
 
     with pytest.raises(AiError, match="agent_runs_url is not configured"):
         run(handler, lambda ai: ai.get_agent_run(made["id"]), agent_runs_url=None)
+
+
+def test_eval_runs_go_to_the_eval_worker_and_accept_its_202() -> None:
+    seen: list[httpx.Request] = []
+    made = {"id": "eval_00000000-0000-0000-0000-000000000000", "status": "queued", "scorers": []}
+    cases = [{"id": "a", "input": "1+1", "expected": "2"}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "GET" and request.url.path == "/v1/eval-runs":
+            return httpx.Response(200, json={"data": [], "nextCursor": None})
+        return httpx.Response(202 if request.method == "POST" else 200, json=made)
+
+    created = run(
+        handler,
+        lambda ai: ai.create_eval_run(
+            name="smoke",
+            dataset_version="1",
+            model="m",
+            cases=cases,
+            idempotency_key="key-00001",
+        ),
+    )
+    assert created["status"] == "queued"
+    assert str(seen[0].url) == "http://evals/v1/eval-runs"
+    assert seen[0].headers["idempotency-key"] == "key-00001"
+    assert json.loads(seen[0].content) == {
+        "name": "smoke",
+        "datasetVersion": "1",
+        "model": "m",
+        "cases": cases,
+    }
+
+    run(handler, lambda ai: ai.get_eval_run(made["id"]))
+    assert seen[1].url.path == f"/v1/eval-runs/{made['id']}"
+
+    run(handler, lambda ai: ai.cancel_eval_run(made["id"]))
+    assert seen[2].url.path == f"/v1/eval-runs/{made['id']}/cancel"
+
+    run(handler, lambda ai: ai.list_eval_runs(status="finished", limit=5))
+    assert dict(seen[3].url.params) == {"status": "finished", "limit": "5"}
+
+    with pytest.raises(AiError, match="eval_runs_url is not configured"):
+        run(handler, lambda ai: ai.get_eval_run(made["id"]), eval_runs_url=None)
