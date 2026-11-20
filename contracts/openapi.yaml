@@ -708,6 +708,7 @@ components:
       description: |
         Not retryable. Codes: `invalid_request`, `unsupported_parameter`,
         `unsupported_operation`, `unsupported_modality`, `context_too_large`,
+        `no_eligible_model` (a route has no model that fits the request),
         `provider_rejected`, `unknown_tag`.
       content:
         application/json:
@@ -774,11 +775,17 @@ components:
           type: array
           items:
             type: object
-            required: [id, object, owned_by, capabilities]
+            required: [id, object, capabilities]
             properties:
               id: { type: string }
-              object: { const: model }
-              owned_by: { enum: [bedrock, vertex] }
+              object:
+                description: >-
+                  `model`, or `route` (ADR 0014): an id that resolves to one of several
+                  models per request. Clients ignore kinds they do not know.
+                enum: [model, route]
+              owned_by:
+                description: Present for a `model`; a `route` has no single provider.
+                enum: [bedrock, vertex]
               capabilities:
                 $ref: "./vendor/schemas/capability-descriptor.json"
     ContentPart:

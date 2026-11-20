@@ -42,7 +42,12 @@ const ledger = {
       return { state: "new" };
     }
     return seen === hash
-      ? { state: "replay", status: 200, body: { replayed: true } }
+      ? {
+          state: "replay",
+          status: 200,
+          body: { replayed: true },
+          modelId: null,
+        }
       : { state: "mismatch" };
   },
   complete: async (_: unknown, _k: string, status: number) => {

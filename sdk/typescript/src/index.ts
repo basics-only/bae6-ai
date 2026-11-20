@@ -553,7 +553,14 @@ export class Ai {
   async models(options: CallOptions = {}) {
     const body = await this.#call("GET", "/v1/models", options);
     if (!Array.isArray(body.data)) throw invalidResponse();
-    return body.data as { id: string; owned_by: string; capabilities: Json }[];
+    return body.data as {
+      id: string;
+      /** `model`, `route`, or a kind added later; skip what you do not know. */
+      object: string;
+      /** Absent on a route, which has no single provider. */
+      owned_by?: string;
+      capabilities: Json;
+    }[];
   }
 
   /** Usage of this application, by model and outcome, in [from, to) (at most 93 days). */
