@@ -182,9 +182,11 @@ const identities: Record<string, Identity> = {
 };
 
 const server = createGateway({
+  credentials: () => [],
   verify: async (t) => (t ? (identities[t] ?? null) : null),
   ledger,
   feedback: {} as never,
+  analytics: {} as never,
   models: new Map(
     configs.map((config) => [
       config.id,

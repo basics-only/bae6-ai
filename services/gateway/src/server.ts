@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import {
   createServer,
@@ -15,6 +15,16 @@ import {
   type Usage,
 } from "@bae6/ai-core";
 import {
+  type Analytics,
+  type GroupBy,
+  KIND_OF_PATH,
+  type Kind,
+  parseMeasure,
+  parseUsageQuery,
+  RUN_ID,
+  TAG_ID,
+} from "./analytics.js";
+import {
   CLASSIFIER_MAX_TOKENS,
   CLASSIFIER_TIMEOUT_MS,
   classifierInputTokens,
@@ -22,10 +32,11 @@ import {
   parseTier,
 } from "./classifier.js";
 import type { ClassifierConfig, ModelConfig, RouteConfig } from "./config.js";
+import type { AwsSource } from "./credentials.js";
 import { type Feedback, parseFeedback } from "./feedback.js";
 import { envelope, HttpError, readBody, send } from "./http.js";
 import { type Identity, identify, type Verifier } from "./identity.js";
-import type { Caller, Ledger, Outcome } from "./ledger.js";
+import type { Caller, Ledger, Outcome, Tags, Timing } from "./ledger.js";
 import {
   type ChatInput,
   chunk,
@@ -48,10 +59,18 @@ interface Chosen {
   route?: { id: string; decision: string };
 }
 
+export interface CredentialStatus {
+  provider: "bedrock" | "vertex";
+  source: AwsSource | "metadata";
+  lastRefreshAgeSeconds: number | null;
+}
+
 export interface GatewayDeps {
+  credentials: () => CredentialStatus[];
   verify: Verifier;
   ledger: Ledger;
   feedback: Feedback;
+  analytics: Analytics;
   models: Map<string, GatewayModel>;
   routes?: RouteConfig[];
   /** Monthly limit per organization; an organization without one cannot spend. */
@@ -68,6 +87,8 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_TOKENS = 1024;
 const MAX_USAGE_WINDOW_MS = 93 * 24 * 3600_000;
 const MAX_FEEDBACK_BODY_BYTES = 16 * 1024;
+const MAX_TAG_BODY_BYTES = 4 * 1024;
+const MAX_TAG_NAME = 64;
 const MAX_FEEDBACK_PAGE = 100;
 const FEEDBACK_PER_WINDOW = 120;
 const FEEDBACK_WINDOW_MS = 60_000;
@@ -75,6 +96,12 @@ const REQUEST_ID = /^[A-Za-z0-9._-]{1,64}$/;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._-]{8,128}$/;
 
 type Who = Identity & { workloadId?: string };
+
+/** What a call was tagged with and when its provider call started, for the usage event. */
+interface Meta {
+  tags: Tags;
+  startedAt: number;
+}
 
 const callerOf = (who: Who): Caller => ({
   organizationId: who.organizationId,
@@ -170,7 +197,7 @@ function providerHttpError(err: unknown, timedOut: boolean): HttpError {
 }
 
 export function createGateway(deps: GatewayDeps) {
-  const { ledger, feedback, models, log = () => {} } = deps;
+  const { ledger, feedback, analytics, models, log = () => {} } = deps;
   const routes = new Map((deps.routes ?? []).map((r) => [r.id, r]));
   // shortcut: fixed window per replica, so N replicas allow N times the limit; share it if that matters.
   const feedbackWindows = new Map<string, { start: number; count: number }>();
@@ -178,9 +205,15 @@ export function createGateway(deps: GatewayDeps) {
   let inflight = 0;
   const inflightByOrg = new Map<string, number>();
 
-  async function finalize(id: string, outcome: Outcome) {
+  const timing = (m: Meta, firstTokenAt: number | null): Timing => ({
+    latencyMs: Math.round(performance.now() - m.startedAt),
+    firstTokenMs:
+      firstTokenAt === null ? null : Math.round(firstTokenAt - m.startedAt),
+  });
+
+  async function finalize(id: string, outcome: Outcome, t: Timing) {
     try {
-      await ledger.finalize(id, outcome);
+      await ledger.finalize(id, outcome, t);
     } catch (err) {
       // The reconciler finalizes it as uncertain once the lease expires.
       log({ msg: "finalize_failed", ledgerId: id, error: (err as Error).name });
@@ -199,6 +232,67 @@ export function createGateway(deps: GatewayDeps) {
       log({ msg: "feedback_unavailable", error: err.name });
       throw new HttpError(503, "unavailable", "Feedback is unavailable.", 1);
     });
+
+  // Tags and tag lists sit beside the ledger, so their outage reads as metering's.
+  const analyticsStore = <T>(read: Promise<T>) =>
+    read.catch((err: unknown) => {
+      if (err instanceof HttpError) throw err;
+      log({ msg: "analytics_unavailable", error: (err as Error).name });
+      throw new HttpError(
+        503,
+        "unavailable",
+        "Usage analytics is unavailable.",
+        1,
+      );
+    });
+
+  function tagsOf(req: IncomingMessage): Tags {
+    const defined = (header: string, name: string) => {
+      const v = req.headers[header];
+      if (v === undefined) return null;
+      if (typeof v !== "string" || !TAG_ID.test(v)) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          `${name} must match ${TAG_ID}.`,
+        );
+      }
+      return v;
+    };
+    const run = req.headers["bae6-run-id"];
+    if (run !== undefined && (typeof run !== "string" || !RUN_ID.test(run))) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `Bae6-Run-Id must match ${RUN_ID}.`,
+      );
+    }
+    return {
+      taskType: defined("bae6-task-type", "Bae6-Task-Type"),
+      domain: defined("bae6-domain", "Bae6-Domain"),
+      runId: run ?? null,
+    };
+  }
+
+  /** Each tag must be one the organization defined, else nothing is spent. */
+  async function checkTags(who: Who, tags: Tags) {
+    const named: [Kind, string, string | null][] = [
+      ["task_type", "Bae6-Task-Type", tags.taskType],
+      ["domain", "Bae6-Domain", tags.domain],
+    ];
+    for (const [kind, name, id] of named) {
+      if (
+        id !== null &&
+        !(await analyticsStore(analytics.defined(who.organizationId, kind, id)))
+      ) {
+        throw new HttpError(
+          400,
+          "unknown_tag",
+          `${name} names a tag this organization has not defined.`,
+        );
+      }
+    }
+  }
 
   function resolve(id: string, who: Who, op: Operation): GatewayModel {
     const m = models.get(id);
@@ -226,12 +320,16 @@ export function createGateway(deps: GatewayDeps) {
     sha256: string,
     inputTokens: number,
     choose: () => Promise<Chosen>,
+    tags: Tags,
   ): Promise<{ ledgerId: string; chosen: Chosen } | null> {
     const caller = callerOf(who);
     const ledgerId = `led_${randomUUID()}`;
     try {
       if (key) {
-        const claim = await ledger.claim(caller, key, sha256, ledgerId);
+        const requestHash = createHash("sha256")
+          .update(JSON.stringify([sha256, tags]))
+          .digest("hex");
+        const claim = await ledger.claim(caller, key, requestHash, ledgerId);
         if (claim.state === "replay") {
           const first =
             claim.modelId === null ? undefined : models.get(claim.modelId);
@@ -265,6 +363,12 @@ export function createGateway(deps: GatewayDeps) {
           );
         }
       }
+      try {
+        await checkTags(who, tags);
+      } catch (err) {
+        if (key) await ledger.release(caller, key).catch(() => {});
+        throw err;
+      }
       let chosen: Chosen;
       try {
         chosen = await choose();
@@ -290,6 +394,8 @@ export function createGateway(deps: GatewayDeps) {
               maxOutputTokens: chosen.maxTokens,
               leaseMs: deps.timeoutMs + 60_000,
               ...(chosen.route ? { route: chosen.route } : {}),
+              tags,
+              endUser: who.subjectType === "user",
             });
       if (estimate === null) {
         if (key) await ledger.release(caller, key);
@@ -330,6 +436,7 @@ export function createGateway(deps: GatewayDeps) {
     who: Who,
     ledgerId: string,
     key: string | undefined,
+    meta: Meta,
     call: (signal: AbortSignal) => Promise<{ body: unknown; usage: Usage }>,
   ) {
     const closed = new AbortController();
@@ -353,7 +460,7 @@ export function createGateway(deps: GatewayDeps) {
       if (e.retryAfterSeconds !== undefined)
         res.setHeader("retry-after", String(e.retryAfterSeconds));
     }
-    await finalize(ledgerId, outcome);
+    await finalize(ledgerId, outcome, timing(meta, null));
     if (key) {
       const caller = callerOf(who);
       // A call the provider did not bill is safe to retry, so it is not replayed.
@@ -374,6 +481,7 @@ export function createGateway(deps: GatewayDeps) {
     requestId: string,
     who: Who,
     key: string | undefined,
+    meta: Meta,
   ) {
     const { json, sha256 } = await readBody(req, MAX_BODY_BYTES);
     const input = parseChat(json);
@@ -414,8 +522,11 @@ export function createGateway(deps: GatewayDeps) {
         maxOutputTokens: CLASSIFIER_MAX_TOKENS,
         leaseMs: CLASSIFIER_TIMEOUT_MS + 60_000,
         route: { id: r.id, decision: "classifier" },
+        tags: meta.tags,
+        endUser: who.subjectType === "user",
       });
       if (estimate === null) return null;
+      const startedAt = performance.now();
       let text: string | null = null;
       let outcome: Outcome;
       try {
@@ -437,7 +548,7 @@ export function createGateway(deps: GatewayDeps) {
           error: (err as Error).name,
         });
       }
-      await finalize(requestId, outcome);
+      await finalize(requestId, outcome, timing({ ...meta, startedAt }, null));
       return text === null ? null : parseTier(text, tiers);
     };
     const routed = async (r: RouteConfig): Promise<Chosen> => {
@@ -489,11 +600,13 @@ export function createGateway(deps: GatewayDeps) {
       sha256,
       input.inputTokens,
       first ? async () => first : () => routed(route as RouteConfig),
+      meta.tags,
     );
     if (started === null) return;
     const { ledgerId, chosen } = started;
     const { model, maxTokens } = chosen;
     const { config } = model;
+    meta.startedAt = performance.now();
     const chatRequest = (signal: AbortSignal) => ({
       messages: input.messages as Message[],
       maxTokens,
@@ -504,19 +617,27 @@ export function createGateway(deps: GatewayDeps) {
     });
 
     if (!input.stream) {
-      return metered(res, requestId, who, ledgerId, key, async (signal) => {
-        const r = await model.provider.chat(chatRequest(signal));
-        return {
-          body: completion(
-            ledgerId,
-            config.id,
-            r.text,
-            r.finishReason,
-            r.usage,
-          ),
-          usage: r.usage,
-        };
-      });
+      return metered(
+        res,
+        requestId,
+        who,
+        ledgerId,
+        key,
+        meta,
+        async (signal) => {
+          const r = await model.provider.chat(chatRequest(signal));
+          return {
+            body: completion(
+              ledgerId,
+              config.id,
+              r.text,
+              r.finishReason,
+              r.usage,
+            ),
+            usage: r.usage,
+          };
+        },
+      );
     }
 
     const closed = new AbortController();
@@ -531,9 +652,12 @@ export function createGateway(deps: GatewayDeps) {
       events = model.provider.stream(chatRequest(stop))[Symbol.asyncIterator]();
       next = await events.next();
     } catch (err) {
-      await finalize(ledgerId, outcomeOf(err));
+      await finalize(ledgerId, outcomeOf(err), timing(meta, null));
       throw providerHttpError(err, timeout.aborted);
     }
+    // Stamped before any client write, which can block on a slow reader.
+    let firstTokenAt: number | null =
+      !next.done && next.value.type === "delta" ? performance.now() : null;
     res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
@@ -557,6 +681,7 @@ export function createGateway(deps: GatewayDeps) {
       while (!next.done) {
         const e = next.value;
         if (e.type === "delta") {
+          firstTokenAt ??= performance.now();
           await write(chunk(ledgerId, config.id, { content: e.text }));
         } else {
           outcome = { kind: "measured", usage: e.usage };
@@ -575,7 +700,7 @@ export function createGateway(deps: GatewayDeps) {
         );
       }
     } finally {
-      await finalize(ledgerId, outcome);
+      await finalize(ledgerId, outcome, timing(meta, firstTokenAt));
       res.end();
       // A client that stopped reading would otherwise hold the socket indefinitely.
       if (timeout.aborted && res.writableNeedDrain) res.destroy();
@@ -588,6 +713,7 @@ export function createGateway(deps: GatewayDeps) {
     requestId: string,
     who: Who,
     key: string | undefined,
+    meta: Meta,
   ) {
     const { json, sha256 } = await readBody(req, MAX_BODY_BYTES);
     const input = parseEmbeddings(json);
@@ -614,10 +740,12 @@ export function createGateway(deps: GatewayDeps) {
       sha256,
       input.inputTokens,
       async () => ({ model, maxTokens: 0 }),
+      meta.tags,
     );
     if (started === null) return;
     const { ledgerId } = started;
-    return metered(res, requestId, who, ledgerId, key, async (signal) => {
+    meta.startedAt = performance.now();
+    return metered(res, requestId, who, ledgerId, key, meta, async (signal) => {
       const r = await model.provider.embed(input.input, signal);
       const usage = { inputTokens: r.usage.inputTokens, outputTokens: 0 };
       return {
@@ -646,6 +774,7 @@ export function createGateway(deps: GatewayDeps) {
     requestId: string,
   ) {
     const { pathname: path } = url;
+    const started = performance.now();
     if (req.method === "GET" && path === "/health/live")
       return send(res, 200, { status: "ok" });
     if (req.method === "GET" && path === "/health/ready") {
@@ -747,6 +876,21 @@ export function createGateway(deps: GatewayDeps) {
         reserved: b.reserved ?? "0",
       });
     }
+    if (endpoint === "GET /v1/credentials") {
+      requireScope(who, "ai:usage:read");
+      const providers = new Set(
+        [...models.values()]
+          .filter(
+            (m) =>
+              !m.config.organizations ||
+              m.config.organizations.includes(who.organizationId),
+          )
+          .map((m) => m.config.provider),
+      );
+      return send(res, 200, {
+        data: deps.credentials().filter((c) => providers.has(c.provider)),
+      });
+    }
     if (endpoint === "GET /v1/usage") {
       requireScope(who, "ai:usage:read");
       const now = new Date();
@@ -768,6 +912,113 @@ export function createGateway(deps: GatewayDeps) {
         to: to.toISOString(),
         data: await metering(ledger.usage(who, from, to)),
       });
+    }
+
+    if (endpoint === "GET /v1/usage/concentration") {
+      requireScope(who, "ai:usage:read");
+      const q = parseUsageQuery(url, who, true);
+      const measure = parseMeasure(url);
+      return send(res, 200, {
+        from: q.from.toISOString(),
+        to: q.to.toISOString(),
+        groupBy: q.groupBy,
+        group: q.group,
+        measure,
+        data: await analyticsStore(analytics.concentration(q, measure)),
+      });
+    }
+    if (endpoint === "GET /v1/usage/distribution") {
+      requireScope(who, "ai:usage:read");
+      const q = parseUsageQuery(url, who, true);
+      const measure = parseMeasure(url);
+      return send(res, 200, {
+        from: q.from.toISOString(),
+        to: q.to.toISOString(),
+        groupBy: q.groupBy,
+        group: q.group,
+        measure,
+        ...(await analyticsStore(analytics.distribution(q, measure))),
+      });
+    }
+    if (
+      endpoint === "GET /v1/usage/summary" ||
+      endpoint === "GET /v1/usage/series"
+    ) {
+      requireScope(who, "ai:usage:read");
+      const series = path.endsWith("/series");
+      const q = parseUsageQuery(url, who, series);
+      const head = {
+        from: q.from.toISOString(),
+        to: q.to.toISOString(),
+        groupBy: q.groupBy,
+      };
+      if (series) {
+        return send(res, 200, {
+          ...head,
+          group: q.group,
+          data: await analyticsStore(analytics.series(q)),
+        });
+      }
+      const r = await analyticsStore(
+        analytics.summary({ ...q, groupBy: q.groupBy as GroupBy }),
+      );
+      return send(res, 200, { ...head, ...r });
+    }
+    const tagRoute = /^\/v1\/(task-types|domains)(?:\/([^/]+))?$/.exec(path);
+    if (tagRoute) {
+      const kind = KIND_OF_PATH[tagRoute[1] as string] as Kind;
+      const id = tagRoute[2];
+      if (id === undefined && req.method === "GET") {
+        requireScope(who, "ai:usage:read");
+        return send(res, 200, {
+          data: await analyticsStore(analytics.tags(who.organizationId, kind)),
+        });
+      }
+      if (id !== undefined && req.method === "PUT") {
+        requireScope(who, "ai:usage:admin");
+        if (!TAG_ID.test(id) || id === "untagged") {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            `The id must match ${TAG_ID} and not be untagged.`,
+          );
+        }
+        const { json } = await readBody(req, MAX_TAG_BODY_BYTES);
+        const name = (json as { name?: unknown } | null)?.name;
+        if (
+          typeof json !== "object" ||
+          json === null ||
+          Object.keys(json).some((k) => k !== "name") ||
+          typeof name !== "string" ||
+          name.length < 1 ||
+          name.length > MAX_TAG_NAME ||
+          name.includes("\u0000")
+        ) {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            `Body must be {"name": 1 to ${MAX_TAG_NAME} characters}.`,
+          );
+        }
+        return send(
+          res,
+          200,
+          await analyticsStore(
+            analytics.put(who.organizationId, kind, id, name),
+          ),
+        );
+      }
+      if (id !== undefined && req.method === "DELETE") {
+        requireScope(who, "ai:usage:admin");
+        const removed =
+          TAG_ID.test(id) &&
+          (await analyticsStore(
+            analytics.remove(who.organizationId, kind, id),
+          ));
+        if (!removed) throw new HttpError(404, "not_found", "Tag not found.");
+        res.writeHead(204).end();
+        return;
+      }
     }
 
     if (endpoint === "POST /v1/feedback") {
@@ -872,7 +1123,11 @@ export function createGateway(deps: GatewayDeps) {
     inflight++;
     inflightByOrg.set(org, orgInflight + 1);
     try {
-      await invoke(req, res, requestId, who, keyHeader);
+      const tags = tagsOf(req);
+      await invoke(req, res, requestId, who, keyHeader, {
+        tags,
+        startedAt: started,
+      });
     } finally {
       inflight--;
       const left = (inflightByOrg.get(org) ?? 1) - 1;
