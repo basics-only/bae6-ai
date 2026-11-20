@@ -63,6 +63,16 @@ for (const m of config.models) {
   }
 }
 
+if (
+  config.models.some((m) => m.provider === "bedrock") &&
+  !env.AWS_CONTAINER_CREDENTIALS_FULL_URI &&
+  env.NODE_ENV !== "development"
+) {
+  throw new Error(
+    "Bedrock models need EKS Pod Identity (AWS_CONTAINER_CREDENTIALS_FULL_URI); static AWS keys require NODE_ENV=development",
+  );
+}
+
 const port = int("PORT", 8080, 1, 65535);
 const timeoutMs = int("BAE6_PROVIDER_TIMEOUT_MS", 60_000, 1000, 300_000);
 const maxInflight = int("BAE6_MAX_INFLIGHT", 64, 1, 10_000);
