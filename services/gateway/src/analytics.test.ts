@@ -238,6 +238,34 @@ test(
 );
 
 test(
+  "series of a 93-day window starting mid-day spans 94 days and fits the contract",
+  { skip },
+  async () => {
+    const o = org();
+    const start = Date.parse("2026-06-01T12:00:00Z");
+    for (let d = 0; d < 94; d++) {
+      await insert({
+        organization: o,
+        time: new Date(
+          start + d * 86_400_000 + (d === 93 ? -11 : 1) * 3_600_000,
+        ).toISOString(),
+        subject: "u1",
+        endUser: true,
+      });
+    }
+    const days = await analytics.series(
+      query({
+        groupBy: null,
+        organization: o,
+        from: at("2026-06-01T12:00:00Z"),
+        to: at("2026-09-02T12:00:00Z"),
+      }),
+    );
+    assert.equal(days.length, 94);
+  },
+);
+
+test(
   "series gives one point per UTC day with calls, and clips the first day",
   {
     skip,

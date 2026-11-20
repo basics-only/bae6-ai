@@ -999,7 +999,7 @@ components:
         group: { type: [string, "null"] }
         data:
           type: array
-          maxItems: 93
+          maxItems: 94
           items:
             allOf:
               - $ref: "#/components/schemas/UsageMeasures"
