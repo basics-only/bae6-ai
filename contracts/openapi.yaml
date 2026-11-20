@@ -308,6 +308,49 @@ paths:
           $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
         "503":
           $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/usage/distribution:
+    get:
+      operationId: getUsageDistribution
+      summary: How concentrated usage is across end users. Needs `ai:usage:read`.
+      description: |
+        For each whole percent from 1 to 100, the share of `measure` used by that top
+        percent of end users, so `{ topUsersPercent: 10, share: 0.85 }` means the top 10% of
+        users used 85%. Only calls made for an end user count. Carries no user ids. `groupBy`
+        and `group` narrow it as in `/v1/usage/series`; scope rules are those of
+        `/v1/usage/summary`. With no end users `users` is 0 and `data` is empty.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/UsageFrom"
+        - $ref: "#/components/parameters/UsageTo"
+        - $ref: "#/components/parameters/UsageOrganization"
+        - name: groupBy
+          in: query
+          schema:
+            enum: [organization, taskType, domain, model, run]
+        - name: group
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 128 }
+        - name: measure
+          in: query
+          schema:
+            enum: [tokens, cost]
+            default: tokens
+      responses:
+        "200":
+          description: The distribution.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageDistribution"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
   /v1/task-types:
     get:
       operationId: listTaskTypes
@@ -989,6 +1032,36 @@ components:
                     description: |
                       A model id, organization id, tag id or run id, or `untagged`.
                     type: string
+    UsageDistribution:
+      type: object
+      required: [from, to, groupBy, group, measure, users, total, data]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        groupBy: { enum: [organization, taskType, domain, model, run, null] }
+        group: { type: [string, "null"] }
+        measure: { enum: [tokens, cost] }
+        users:
+          description: Distinct end users with calls in the window.
+          type: integer
+          minimum: 0
+        total:
+          description: Everything those users used, in tokens or in the price book's currency.
+          allOf:
+            - $ref: "#/components/schemas/Decimal"
+        data:
+          type: array
+          maxItems: 100
+          items:
+            type: object
+            required: [topUsersPercent, share]
+            properties:
+              topUsersPercent: { type: integer, minimum: 1, maximum: 100 }
+              share:
+                description: Of the total, used by the top `topUsersPercent` of users; from 0 to 1.
+                type: number
+                minimum: 0
+                maximum: 1
     UsageSeries:
       type: object
       required: [from, to, groupBy, group, data]
