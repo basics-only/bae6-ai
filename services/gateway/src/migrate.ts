@@ -9,7 +9,7 @@ const LOCK_POLL_MS = 200;
 const LOCK_WAIT_MS = 10 * 60_000;
 const NO_TRANSACTION = "-- no-transaction";
 
-/** Applies every unapplied `migrations/*.sql` in order, each in its own transaction. */
+/** Applies every unapplied `migrations/*.sql` in order, each in its own transaction unless it starts with `-- no-transaction`. */
 export async function migrate(client: ClientBase): Promise<string[]> {
   // Polling, not pg_advisory_lock: a statement blocked on the lock holds a snapshot that
   // CREATE INDEX CONCURRENTLY waits for, which would deadlock.
@@ -47,6 +47,9 @@ export async function migrate(client: ClientBase): Promise<string[]> {
       const record = "INSERT INTO schema_migrations (version) VALUES ($1)";
       if (sql.startsWith(NO_TRANSACTION)) {
         // CREATE INDEX CONCURRENTLY cannot run in a transaction or a multi-statement query.
+        // An index build on a large table outlasts the pool's statement_timeout.
+        await client.query("SET statement_timeout = 0");
+        await client.query("SET lock_timeout = '5s'");
         try {
           for (const statement of sql.split(";\n").filter((s) => s.trim())) {
             await client.query(statement);
@@ -54,6 +57,9 @@ export async function migrate(client: ClientBase): Promise<string[]> {
           await client.query(record, [file]);
         } catch (err) {
           throw new Error(`migration ${file} failed`, { cause: err });
+        } finally {
+          await client.query("RESET statement_timeout");
+          await client.query("RESET lock_timeout");
         }
         applied.push(file);
         continue;
