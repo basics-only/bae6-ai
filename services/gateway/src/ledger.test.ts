@@ -183,6 +183,37 @@ test(
 );
 
 test(
+  "classifier decisions are stored, and a decision outside the known shapes is refused",
+  { skip },
+  async () => {
+    const reserve = (decision: string) =>
+      ledger.reserve({
+        requestId: `led_${randomUUID()}`,
+        caller: caller(),
+        limit: "5",
+        provider: "bedrock",
+        modelId: "m",
+        inputTokens: 1,
+        maxOutputTokens: 0,
+        leaseMs: 60_000,
+        route: { id: "auto", decision },
+        tags: untagged,
+        endUser: false,
+      });
+    for (const decision of [
+      "classifier",
+      "classifier:hard",
+      "default:classifier",
+    ]) {
+      assert.notEqual(await reserve(decision), null);
+    }
+    for (const decision of ["classifier:Hard", "classifier:", "classify"]) {
+      await assert.rejects(reserve(decision), /decision_check/);
+    }
+  },
+);
+
+test(
   "an idempotency key replays, and refuses a different request",
   { skip },
   async () => {
