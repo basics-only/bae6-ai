@@ -12,10 +12,13 @@ ALTER TABLE usage_events
   ADD COLUMN run_id text,
   -- Events from before this migration have no end-user flag and count as no active user.
   ADD COLUMN end_user boolean NOT NULL DEFAULT false,
-  ADD COLUMN latency_ms integer CHECK (latency_ms >= 0),
-  ADD COLUMN first_token_ms integer CHECK (first_token_ms >= 0);
+  ADD COLUMN latency_ms integer,
+  ADD COLUMN first_token_ms integer;
 
-CREATE INDEX usage_events_org_time ON usage_events (organization_id, time);
+-- NOT VALID: existing rows are all NULL, so skip the validating scan under the table lock.
+ALTER TABLE usage_events
+  ADD CONSTRAINT usage_events_latency_ms_check CHECK (latency_ms >= 0) NOT VALID,
+  ADD CONSTRAINT usage_events_first_token_ms_check CHECK (first_token_ms >= 0) NOT VALID;
 
 CREATE TABLE tags (
   organization_id text NOT NULL CHECK (organization_id ~ '^[a-z0-9][a-z0-9-]{0,62}$'),
