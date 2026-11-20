@@ -72,7 +72,7 @@ const IDEMPOTENCY_KEY = /^[A-Za-z0-9._-]{8,128}$/;
 
 type Who = Identity & { workloadId?: string };
 
-/** What a call was tagged with and when it started, for the usage event. */
+/** What a call was tagged with and when its provider call started, for the usage event. */
 interface Meta {
   tags: Tags;
   startedAt: number;
@@ -416,6 +416,7 @@ export function createGateway(deps: GatewayDeps) {
       meta.tags,
     );
     if (ledgerId === null) return;
+    meta.startedAt = performance.now();
     const chatRequest = (signal: AbortSignal) => ({
       messages: input.messages as Message[],
       maxTokens,
@@ -545,6 +546,7 @@ export function createGateway(deps: GatewayDeps) {
       meta.tags,
     );
     if (ledgerId === null) return;
+    meta.startedAt = performance.now();
     return metered(res, requestId, who, ledgerId, key, meta, async (signal) => {
       const r = await model.provider.embed(input.input, signal);
       const usage = { inputTokens: r.usage.inputTokens, outputTokens: 0 };

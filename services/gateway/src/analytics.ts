@@ -427,15 +427,19 @@ export function createAnalytics(pool: pg.Pool, requestPool: pg.Pool = pool) {
              date_trunc('day', ($2::timestamptz AT TIME ZONE 'UTC') - interval '1 microsecond'),
              interval '1 day')
          ), days AS (
-           SELECT m.d AS day, least(m.d + interval '1 day', $2::timestamptz AT TIME ZONE 'UTC') AS day_end
-           FROM m
+           SELECT c.day, least(c.day + interval '1 day', $2::timestamptz AT TIME ZONE 'UTC') AS day_end
+           FROM calendar c(day)
+           WHERE c.day >= date_trunc('day', $1::timestamptz AT TIME ZONE 'UTC')
          ), ${cover(1)}, ${cover(7)}, ${cover(30)}
-         SELECT to_char(days.day, 'YYYY-MM-DD') AS day, m.*,
+         SELECT to_char(days.day, 'YYYY-MM-DD') AS day,
+           coalesce(m.requests, 0) AS requests, coalesce(m.input_tokens, 0) AS input_tokens,
+           coalesce(m.output_tokens, 0) AS output_tokens, coalesce(m.cost, '0') AS cost,
+           m.l50, m.l95, m.f50, m.f95,
            (CASE WHEN ${aligned} THEN au_1.n ELSE r.au_day END)::int AS au_day,
            (CASE WHEN ${aligned} THEN au_7.n ELSE r.au_week END)::int AS au_week,
            (CASE WHEN ${aligned} THEN au_30.n ELSE r.au_month END)::int AS au_month
          FROM days
-         JOIN m ON m.d = days.day
+         LEFT JOIN m ON m.d = days.day
          JOIN au_1 ON au_1.day = days.day
          JOIN au_7 ON au_7.day = days.day
          JOIN au_30 ON au_30.day = days.day

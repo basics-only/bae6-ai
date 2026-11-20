@@ -274,8 +274,8 @@ paths:
       operationId: getUsageSeries
       summary: Usage per UTC day, for everything or for one group. Needs `ai:usage:read`.
       description: |
-        The same measures and scope rules as `/v1/usage/summary`, one point per UTC day that
-        has calls, oldest first, at most 93. A partial first or last day covers only the part
+        The same measures and scope rules as `/v1/usage/summary`, one point per UTC day in
+        the window, oldest first, at most 94; a day without calls reports zeros. A partial first or last day covers only the part
         inside `[from, to)`. `activeUsers` on a day count the trailing 1, 7 and 30 days ending
         at the end of that day (or at `to`, if sooner). With neither `groupBy` nor `group` the
         series covers everything in scope; giving one without the other is `400`.

@@ -76,9 +76,12 @@ const live = <T>(v: T) => {
   if (analyticsDown) throw new Error("db down");
   return v;
 };
+let tagLookupMs = 0;
 const analytics = {
-  defined: async (_o: string, kind: string, id: string) =>
-    live(kind === "task_type" && id === "summarization"),
+  defined: async (_o: string, kind: string, id: string) => {
+    await new Promise((r) => setTimeout(r, tagLookupMs));
+    return live(kind === "task_type" && id === "summarization");
+  },
   tags: async () =>
     live([{ id: "summarization", name: "Summarization", updatedAt: tagTime }]),
   put: async (_o: string, _k: string, id: string, name: string) =>
@@ -507,6 +510,18 @@ test("a tag the organization has not defined is refused before any spend", async
     conforms("ErrorEnvelope", body);
   }
   assert.equal(reserved.length, 0);
+});
+
+test("latency leaves out the time spent before the provider call", async () => {
+  timings.length = 0;
+  tagLookupMs = 300;
+  try {
+    const res = await tagged("acme", { "bae6-task-type": "summarization" });
+    assert.equal(res.status, 200);
+  } finally {
+    tagLookupMs = 0;
+  }
+  assert.ok((timings[0]?.latencyMs ?? 1000) < 200);
 });
 
 test("a defined tag and run id reach the ledger with the end-user flag and timing", async () => {

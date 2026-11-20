@@ -271,7 +271,7 @@ test(
 );
 
 test(
-  "series gives one point per UTC day with calls, and clips the first day",
+  "series gives one point per UTC day, and clips the first day",
   {
     skip,
   },
@@ -297,11 +297,13 @@ test(
     assert.deepEqual(
       all.map((d) => [d.day, d.requests]),
       [
+        ["2026-11-09", 0],
         ["2026-11-10", 2],
+        ["2026-11-11", 0],
         ["2026-11-12", 1],
       ],
     );
-    assert.deepEqual(all[1]?.activeUsers, { day: 1, week: 2, month: 2 });
+    assert.deepEqual(all[3]?.activeUsers, { day: 1, week: 2, month: 2 });
 
     const clipped = await analytics.series(
       query({
@@ -324,7 +326,12 @@ test(
     );
     assert.deepEqual(
       one.map((d) => [d.day, d.requests]),
-      [["2026-11-10", 1]],
+      [
+        ["2026-11-09", 0],
+        ["2026-11-10", 1],
+        ["2026-11-11", 0],
+        ["2026-11-12", 0],
+      ],
     );
   },
 );
@@ -780,3 +787,26 @@ test(
     assert.equal(await split.defined(o, "domain", "legal"), true);
   },
 );
+
+test("series reports a quiet day as zeros", { skip }, async () => {
+  const o = org();
+  for (const time of ["2026-11-10T12:00:00Z", "2026-11-12T12:00:00Z"]) {
+    await insert({ organization: o, time, endUser: true, subject: "u" });
+  }
+  const days = await analytics.series(
+    query({
+      groupBy: null,
+      organization: o,
+      from: at("2026-11-10T00:00:00Z"),
+      to: at("2026-11-13T00:00:00Z"),
+    }),
+  );
+  assert.deepEqual(
+    days.map((d) => [d.day, d.requests, d.cost]),
+    [
+      ["2026-11-10", 1, "1"],
+      ["2026-11-11", 0, "0"],
+      ["2026-11-12", 1, "1"],
+    ],
+  );
+});
