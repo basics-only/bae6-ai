@@ -99,7 +99,7 @@ const analytics = {
   concentration: async (q: UsageQuery) => {
     asked.push(q);
     return live([
-      { day: "2026-11-19", users: 5, top5: 0.4, top10: 0.5, top20: 0.7 },
+      { month: "2026-11", users: 5, top5: 0.4, top10: 0.5, top20: 0.7 },
     ]);
   },
   distribution: async (q: UsageQuery) => {

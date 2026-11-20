@@ -354,11 +354,12 @@ paths:
   /v1/usage/concentration:
     get:
       operationId: getUsageConcentration
-      summary: How concentrated usage is across end users, day by day. Needs `ai:usage:read`.
+      summary: How concentrated usage is across end users, month by month. Needs `ai:usage:read`.
       description: |
-        For each UTC day with end-user calls, the share of `measure` used by that day's top 5%,
-        10% and 20% of end users. Parameters, scope rules and privacy are those of
-        `/v1/usage/distribution`. Days without end-user calls are left out.
+        For each UTC calendar month with end-user calls, the share of `measure` used by that
+        month's top 5%, 10% and 20% of end users. The first and last month cover only the part
+        inside the window. Parameters, scope rules and privacy are those of
+        `/v1/usage/distribution`. Months without end-user calls are left out.
       parameters:
         - $ref: "#/components/parameters/EndUserToken"
         - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
@@ -1084,12 +1085,12 @@ components:
         measure: { enum: [tokens, cost] }
         data:
           type: array
-          maxItems: 94
+          maxItems: 4
           items:
             type: object
-            required: [day, users, top5, top10, top20]
+            required: [month, users, top5, top10, top20]
             properties:
-              day: { type: string, format: date }
+              month: { type: string, pattern: "^[0-9]{4}-[0-9]{2}$" }
               users: { type: integer, minimum: 1 }
               top5: { type: number, minimum: 0, maximum: 1 }
               top10: { type: number, minimum: 0, maximum: 1 }

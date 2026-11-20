@@ -624,7 +624,7 @@ test("distribution is empty when no end user called", { skip }, async () => {
 });
 
 test(
-  "concentration gives each day's top 5, 10 and 20 percent shares",
+  "concentration gives each month's top 5, 10 and 20 percent shares, adding a user's days together",
   { skip },
   async () => {
     const o = org();
@@ -634,31 +634,42 @@ test(
         time: T,
         subject: `u${i}`,
         endUser: true,
-        cost: i === 0 ? "81" : "1",
+        cost: i === 0 ? "40" : "1",
       });
     }
     await insert({
       organization: o,
-      time: "2026-11-11T00:00:00Z",
+      time: "2026-11-15T00:00:00Z",
+      subject: "u0",
+      endUser: true,
+      cost: "41",
+    });
+    await insert({
+      organization: o,
+      time: "2026-10-20T00:00:00Z",
       subject: "a",
       endUser: true,
       cost: "7",
     });
     const rows = await analytics.concentration(
-      query({ groupBy: null, organization: o }),
+      query({
+        groupBy: null,
+        organization: o,
+        from: at("2026-10-01T00:00:00Z"),
+      }),
       "cost",
     );
     assert.deepEqual(
-      rows.map((r) => [r.day, r.users]),
+      rows.map((r) => [r.month, r.users]),
       [
-        ["2026-11-10", 20],
-        ["2026-11-11", 1],
+        ["2026-10", 1],
+        ["2026-11", 20],
       ],
     );
-    assert.equal(rows[0]?.top5, 0.81);
-    assert.equal(rows[0]?.top10, 0.82);
-    assert.equal(rows[0]?.top20, 0.84);
-    assert.equal(rows[1]?.top5, 1);
+    assert.equal(rows[0]?.top5, 1);
+    assert.equal(rows[1]?.top5, 0.81);
+    assert.equal(rows[1]?.top10, 0.82);
+    assert.equal(rows[1]?.top20, 0.84);
   },
 );
 

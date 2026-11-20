@@ -341,34 +341,34 @@ export function createAnalytics(pool: pg.Pool) {
         extra.push(`AND ${GROUPS[q.groupBy]} = $${params.length}`);
       }
       const { rows } = await pool.query<{
-        day: string;
+        month: string;
         users: number;
         top5: number;
         top10: number;
         top20: number;
       }>(
         `WITH u AS (
-           SELECT (time AT TIME ZONE 'UTC')::date AS day, subject_id,
+           SELECT date_trunc('month', time AT TIME ZONE 'UTC')::date AS month, subject_id,
                   sum(${MEASURES[measure]}) AS v
            FROM usage_events
            WHERE time >= $1::timestamptz AND time < $2::timestamptz AND end_user
              ${extra.join(" ")}
            GROUP BY 1, 2
          ), r AS (
-           SELECT day, row_number() OVER w AS rn, sum(v) OVER w AS cum,
+           SELECT month, row_number() OVER w AS rn, sum(v) OVER w AS cum,
                   count(*) OVER d AS n, sum(v) OVER d AS total
            FROM u
-           WINDOW d AS (PARTITION BY day),
-                  w AS (PARTITION BY day ORDER BY v DESC, subject_id)
+           WINDOW d AS (PARTITION BY month),
+                  w AS (PARTITION BY month ORDER BY v DESC, subject_id)
          )
-         SELECT to_char(day, 'YYYY-MM-DD') AS day, max(n)::int AS users,
+         SELECT to_char(month, 'YYYY-MM') AS month, max(n)::int AS users,
            ${[5, 10, 20]
              .map(
                (p) =>
                  `coalesce(max(cum / nullif(total, 0)) FILTER (WHERE rn = ceil(n * ${p} / 100.0)), 0)::float8 AS top${p}`,
              )
              .join(", ")}
-         FROM r GROUP BY day ORDER BY day`,
+         FROM r GROUP BY month ORDER BY month`,
         params,
       );
       return rows;

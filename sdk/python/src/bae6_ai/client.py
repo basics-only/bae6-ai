@@ -413,7 +413,7 @@ class Ai:
         organization: str | None = None,
         end_user_token: str | None = None,
     ) -> dict[str, Any]:
-        """How the top users' share of usage moves day by day; carries no user ids."""
+        """How the top users' share of usage moves month by month; carries no user ids."""
         params = _range(start, end)
         for key, value in (
             ("measure", measure),

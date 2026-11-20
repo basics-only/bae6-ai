@@ -139,9 +139,9 @@ export interface UsageConcentration {
   groupBy: UsageGroupBy | null;
   group: string | null;
   measure: "tokens" | "cost";
-  /** Per UTC day with end-user calls: the share used by that day's top 5%, 10% and 20% of users. */
+  /** Per UTC month ("2026-11") with end-user calls: the share used by that month's top 5%, 10% and 20% of users. */
   data: {
-    day: string;
+    month: string;
     users: number;
     top5: number;
     top10: number;
@@ -473,7 +473,7 @@ export class Ai {
     return body as unknown as UsageDistribution;
   }
 
-  /** How the top users' share of usage moves day by day; carries no user ids. */
+  /** How the top users' share of usage moves month by month; carries no user ids. */
   async usageConcentration(
     query: UsageRange & {
       measure?: "tokens" | "cost";
