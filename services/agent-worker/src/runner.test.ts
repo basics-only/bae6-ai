@@ -146,6 +146,36 @@ test("a result longer than the bound is cut", { skip }, async () => {
 });
 
 test(
+  "a run whose heartbeats keep failing is stopped and left for the reaper",
+  { skip },
+  async () => {
+    const r = await submit();
+    let aborted = false;
+    const failing: Store = {
+      ...store,
+      heartbeat: async () => {
+        throw new Error("db down");
+      },
+    };
+    const w = runner(
+      (_run, signal) =>
+        new Promise((resolve) => {
+          signal.addEventListener("abort", () => {
+            aborted = true;
+            resolve({ stop: "aborted", tokens: 0, receipts: [] });
+          });
+        }),
+      { store: failing, leaseMs: 150 },
+    );
+    w.start();
+    await until(async () => aborted, Boolean);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await w.stop();
+    assert.equal((await r.get())?.status, "running");
+  },
+);
+
+test(
   "a run interrupted by shutdown is left for another replica",
   { skip },
   async () => {

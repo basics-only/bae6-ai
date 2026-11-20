@@ -34,7 +34,8 @@ const REQUEST_ID = /^[A-Za-z0-9._-]{1,64}$/;
 const IDEMPOTENCY_KEY = /^[A-Za-z0-9._-]{8,128}$/;
 const MODEL = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const TOOL = /^[A-Za-z0-9_.-]{1,64}$/;
-const RUN_ID = /^run_([0-9a-f-]{36})$/;
+const RUN_ID =
+  /^run_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 const STATUSES: RunStatus[] = ["queued", "running", "finished", "cancelled"];
 const LIMIT_KEYS = [
   "maxSteps",

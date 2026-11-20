@@ -16,15 +16,13 @@ export interface RunnerOptions {
 
 const sleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve) => {
-    const t = setTimeout(resolve, ms);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(t);
-        resolve();
-      },
-      { once: true },
-    );
+    const done = () => {
+      clearTimeout(t);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const t = setTimeout(done, ms);
+    signal.addEventListener("abort", done);
   });
 
 export function createRunner(o: RunnerOptions) {
@@ -36,23 +34,34 @@ export function createRunner(o: RunnerOptions) {
   async function runOne(run: Claimed): Promise<void> {
     const ctl = new AbortController();
     let cancelled = false;
+    let leaseLost = false;
+    let renewedAt = Date.now();
     const beat = setInterval(() => {
       store
         .heartbeat(run.id, run.attempt, o.leaseMs)
         .then((h) => {
-          if (!h) ctl.abort();
-          else if (h.cancelRequested) {
+          if (!h) {
+            leaseLost = true;
+            ctl.abort();
+            return;
+          }
+          renewedAt = Date.now();
+          if (h.cancelRequested) {
             cancelled = true;
             ctl.abort();
           }
         })
-        // The lease holds until it expires, so one failed beat does not end the run.
-        .catch((err: Error) =>
-          log({ msg: "heartbeat_failed", runId: run.id, error: err.name }),
-        );
+        .catch((err: Error) => {
+          log({ msg: "heartbeat_failed", runId: run.id, error: err.name });
+          if (Date.now() - renewedAt >= o.leaseMs) {
+            leaseLost = true;
+            ctl.abort();
+          }
+        });
     }, o.heartbeatMs);
     const stopOnShutdown = () => ctl.abort();
     shutdown.signal.addEventListener("abort", stopOnShutdown, { once: true });
+    if (shutdown.signal.aborted) ctl.abort();
     try {
       let result: RunResult;
       try {
@@ -66,7 +75,11 @@ export function createRunner(o: RunnerOptions) {
         result = { stop: "model_error", tokens: 0, receipts: [] };
       }
       // Interrupted by shutdown, not by the caller: leave the lease to expire so another replica retries it.
-      if (shutdown.signal.aborted && result.stop === "aborted" && !cancelled) {
+      if (
+        (shutdown.signal.aborted || leaseLost) &&
+        result.stop === "aborted" &&
+        !cancelled
+      ) {
         return;
       }
       const kept = await store.finish(run.id, run.attempt, {

@@ -18,7 +18,7 @@ info:
     a ceiling is `400 invalid_request`, never clamped. The queue holds at most a configured
     number of unfinished runs per organization; beyond it a submit is `429`.
 
-    **Delivery.** A run executes at most `attempts` times. A run whose worker died is retried
+    **Delivery.** A run executes a bounded number of times. A run whose worker died is retried
     from the start, and after the last attempt finishes with `stop: abandoned`. Tools must
     tolerate being called again.
 
@@ -56,6 +56,15 @@ paths:
             schema:
               $ref: "#/components/schemas/CreateAgentRun"
       responses:
+        "200":
+          description: Replay of an earlier request with the same `Idempotency-Key`.
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, enum: ["true"] }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
         "202":
           description: Queued.
           content:
@@ -173,11 +182,12 @@ components:
       name: id
       in: path
       required: true
-      schema: { type: string, pattern: "^run_[0-9a-f-]{36}$" }
+      schema:
+        type: string
+        pattern: "^run_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
   responses:
     IdempotencyConflict:
       description: |
-        `conflict`: a request with this key is in progress, retry later.
         `idempotency_key_reused`: the key was used for a different body.
       content:
         application/json:
@@ -218,6 +228,7 @@ components:
           description: At most 32768 characters.
           type: string
           minLength: 1
+          maxLength: 32768
         model:
           description: A model id the deployment's gateway serves.
           type: string
@@ -260,7 +271,9 @@ components:
         - tokens
         - receipts
       properties:
-        id: { type: string, pattern: "^run_[0-9a-f-]{36}$" }
+        id:
+          type: string
+          pattern: "^run_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         status: { $ref: "#/components/schemas/RunStatus" }
         model: { type: string }
         submitterId: { type: string }

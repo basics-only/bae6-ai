@@ -228,6 +228,22 @@ test(
   },
 );
 
+test(
+  "an id that is not a uuid is not found, not a storage error",
+  { skip },
+  async () => {
+    const id = `run_${"-".repeat(36)}`;
+    assert.equal(
+      (await call("GET", `/v1/agent-runs/${id}`, "acme")).status,
+      404,
+    );
+    assert.equal(
+      (await call("POST", `/v1/agent-runs/${id}/cancel`, "acme")).status,
+      404,
+    );
+  },
+);
+
 test("malformed requests are refused", { skip }, async () => {
   for (const body of [
     {},
