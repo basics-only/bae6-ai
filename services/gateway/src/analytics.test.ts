@@ -741,3 +741,42 @@ test("parseMeasure defaults to tokens and refuses an unknown measure", () => {
     refused(400),
   );
 });
+
+test(
+  "the same subject id in two applications counts as two active users",
+  { skip },
+  async () => {
+    const o = org();
+    for (const application of ["one", "two"]) {
+      await insert({
+        organization: o,
+        time: "2026-11-10T00:00:00Z",
+        subject: "u",
+        endUser: true,
+        application,
+      });
+    }
+    const q = query({
+      groupBy: null,
+      organization: o,
+      from: at("2026-11-09T00:00:00Z"),
+      to: at("2026-11-11T00:00:00Z"),
+    });
+    const days = await analytics.series(q);
+    assert.equal(days.at(-1)?.activeUsers.day, 2);
+    assert.equal(days.at(-1)?.activeUsers.month, 2);
+  },
+);
+
+test(
+  "tag lookups use the request pool, so a busy report pool cannot block them",
+  { skip },
+  async () => {
+    const o = org();
+    const reports = new pg.Pool({ connectionString: url, max: 1 });
+    await reports.end();
+    const split = createAnalytics(reports, pool);
+    await analytics.put(o, "domain", "legal", "Legal");
+    assert.equal(await split.defined(o, "domain", "legal"), true);
+  },
+);
