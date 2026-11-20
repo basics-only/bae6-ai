@@ -289,6 +289,10 @@ const identities: Record<string, Identity> = {
 };
 
 const server = createGateway({
+  credentials: () => [
+    { provider: "bedrock", source: "pod-identity", lastRefreshAgeSeconds: 12 },
+    { provider: "vertex", source: "metadata", lastRefreshAgeSeconds: null },
+  ],
   verify: async (t) => (t ? (identities[t] ?? null) : null),
   ledger,
   feedback,
@@ -443,7 +447,7 @@ test("every documented route is served", async () => {
             .filter((m) => m !== "parameters")
             .map((m) => [m.toUpperCase(), path]),
   );
-  assert.equal(routes.length, 19);
+  assert.equal(routes.length, 20);
   for (const [method, path] of routes) {
     const body = method === "POST" ? {} : undefined;
     const res = await call(method as string, path as string, "noscope", body);
@@ -469,9 +473,15 @@ test("responses conform to the contract", async () => {
   conforms("ModelList", await (await call("GET", "/v1/models", "acme")).json());
   conforms("Budget", await (await call("GET", "/v1/budgets", "reader")).json());
   conforms("Usage", await (await call("GET", "/v1/usage", "reader")).json());
+  conforms(
+    "CredentialStatusList",
+    await (await call("GET", "/v1/credentials", "reader")).json(),
+  );
   for (const [res, status, code] of [
     [await post(undefined, hi), 401, "unauthenticated"],
     [await post("noscope", hi), 403, "forbidden"],
+    [await call("GET", "/v1/credentials", "acme"), 403, "forbidden"],
+    [await call("GET", "/v1/credentials", "unknown"), 401, "unauthenticated"],
     [await post("globex", hi), 404, "not_found"],
     [await post("acme", { ...hi, tools: [] }), 400, "unsupported_parameter"],
     [
@@ -739,7 +749,9 @@ test("tag and analytics reads fail closed with 503 when their store is down", as
 
 test("one organization at its concurrency limit is refused while others are served", async () => {
   let release!: () => void;
-  hold = new Promise((r) => (release = r));
+  hold = new Promise((r) => {
+    release = r;
+  });
   entered = 0;
   held = 2;
   const open = { ...hi, model: "open" };
@@ -846,4 +858,13 @@ test("one organization's feedback writes are limited without affecting another",
   assert.equal(statuses[120], 429);
   ratable.set("led_00000000-0000-0000-0000-111111111111", "acme");
   assert.equal((await rate("rater", v)).status, 200);
+});
+
+test("credential status lists only providers the caller's organization has a model on", async () => {
+  const res = await call("GET", "/v1/credentials", "reader");
+  const { data } = (await res.json()) as { data: { provider: string }[] };
+  assert.deepEqual(
+    data.map((c) => c.provider),
+    ["bedrock"],
+  );
 });

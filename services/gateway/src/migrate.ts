@@ -49,7 +49,8 @@ export async function migrate(client: ClientBase): Promise<string[]> {
         // CREATE INDEX CONCURRENTLY cannot run in a transaction or a multi-statement query.
         // An index build on a large table outlasts the pool's statement_timeout.
         await client.query("SET statement_timeout = 0");
-        await client.query("SET lock_timeout = '5s'");
+        // The concurrent build waits out older transactions and blocks no writers, so a short lock_timeout only aborts it.
+        await client.query("SET lock_timeout = 0");
         try {
           for (const statement of sql.split(";\n").filter((s) => s.trim())) {
             await client.query(statement);

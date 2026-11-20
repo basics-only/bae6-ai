@@ -186,6 +186,24 @@ paths:
           $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
         "503":
           $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/credentials:
+    get:
+      operationId: getCredentialStatus
+      summary: Where each configured provider's cloud credentials come from, and when they last refreshed. Needs `ai:usage:read`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+      responses:
+        "200":
+          description: One entry per provider the gateway is configured with. Never contains credentials.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialStatusList"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
   /v1/usage:
     get:
       operationId: getUsage
@@ -930,6 +948,24 @@ components:
           description: Held by calls still in flight.
           allOf:
             - $ref: "#/components/schemas/Decimal"
+    CredentialStatusList:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            required: [provider, source, lastRefreshAgeSeconds]
+            properties:
+              provider: { enum: [bedrock, vertex] }
+              source:
+                description: Where the credentials come from. `development-static` appears only under `NODE_ENV=development`.
+                enum: [pod-identity, web-identity, metadata, development-static]
+              lastRefreshAgeSeconds:
+                description: Seconds since the last successful refresh; null before the first one, and always null for `development-static`.
+                type: [integer, "null"]
+                minimum: 0
     FeedbackRequest:
       type: object
       required: [requestId, verdict]

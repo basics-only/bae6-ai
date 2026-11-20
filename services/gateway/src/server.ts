@@ -42,7 +42,16 @@ export interface GatewayModel {
   provider: ModelProvider;
 }
 
+import type { AwsSource } from "./credentials.js";
+
+export interface CredentialStatus {
+  provider: "bedrock" | "vertex";
+  source: AwsSource | "metadata";
+  lastRefreshAgeSeconds: number | null;
+}
+
 export interface GatewayDeps {
+  credentials: () => CredentialStatus[];
   verify: Verifier;
   ledger: Ledger;
   feedback: Feedback;
@@ -665,6 +674,21 @@ export function createGateway(deps: GatewayDeps) {
         limit: deps.budgets[who.organizationId] ?? "0",
         spent: b.spent ?? "0",
         reserved: b.reserved ?? "0",
+      });
+    }
+    if (endpoint === "GET /v1/credentials") {
+      requireScope(who, "ai:usage:read");
+      const providers = new Set(
+        [...models.values()]
+          .filter(
+            (m) =>
+              !m.config.organizations ||
+              m.config.organizations.includes(who.organizationId),
+          )
+          .map((m) => m.config.provider),
+      );
+      return send(res, 200, {
+        data: deps.credentials().filter((c) => providers.has(c.provider)),
       });
     }
     if (endpoint === "GET /v1/usage") {
