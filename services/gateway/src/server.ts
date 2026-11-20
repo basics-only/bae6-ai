@@ -463,6 +463,9 @@ export function createGateway(deps: GatewayDeps) {
       await finalize(ledgerId, outcomeOf(err), timing(meta, null));
       throw providerHttpError(err, timeout.aborted);
     }
+    // Stamped before any client write, which can block on a slow reader.
+    let firstTokenAt: number | null =
+      !next.done && next.value.type === "delta" ? performance.now() : null;
     res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
@@ -479,7 +482,6 @@ export function createGateway(deps: GatewayDeps) {
       }
     };
     let outcome: Outcome = { kind: "uncertain" };
-    let firstTokenAt: number | null = null;
     try {
       await write(
         chunk(ledgerId, config.id, { role: "assistant", content: "" }),
