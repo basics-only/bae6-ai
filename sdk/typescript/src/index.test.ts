@@ -226,6 +226,20 @@ test("usageSummary sends the group, the runs and the range", async () => {
   assert.equal(q.get("from"), from.toISOString());
 });
 
+test("usageDistribution sends the measure and narrowing", async () => {
+  reply = json(200, { users: 0, total: "0", data: [] });
+  await ai.usageDistribution({
+    measure: "cost",
+    groupBy: "taskType",
+    group: "summarization",
+  });
+  const q = new URL(seenUrl.split(" ")[1] ?? "", "http://x").searchParams;
+  assert.equal(q.get("measure"), "cost");
+  assert.equal(q.get("groupBy"), "taskType");
+  assert.equal(q.get("group"), "summarization");
+  assert.equal(seenUrl.split(" ")[1]?.split("?")[0], "/v1/usage/distribution");
+});
+
 test("manages task types and domains, treating 204 as success", async () => {
   reply = json(200, { data: [{ id: "legal" }] });
   assert.deepEqual(await ai.listDomains(), [{ id: "legal" }]);

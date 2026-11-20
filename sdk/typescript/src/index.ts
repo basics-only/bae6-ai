@@ -120,6 +120,19 @@ export interface UsageSeries {
   data: ({ day: string } & UsageMeasures)[];
 }
 
+export interface UsageDistribution {
+  from: string;
+  to: string;
+  groupBy: UsageGroupBy | null;
+  group: string | null;
+  measure: "tokens" | "cost";
+  /** Distinct end users in the window. */
+  users: number;
+  total: string;
+  /** `share` of the total used by the top `topUsersPercent` of users; empty with no users. */
+  data: { topUsersPercent: number; share: number }[];
+}
+
 export interface Tag {
   id: string;
   name: string;
@@ -418,6 +431,30 @@ export class Ai {
     const body = await this.#call("GET", `/v1/usage/series?${q}`, options);
     if (!Array.isArray(body.data)) throw invalidResponse();
     return body as unknown as UsageSeries;
+  }
+
+  /** How concentrated usage is across end users; carries no user ids. */
+  async usageDistribution(
+    query: UsageRange & {
+      measure?: "tokens" | "cost";
+      groupBy?: UsageGroupBy;
+      group?: string;
+      organization?: string;
+    } = {},
+    options: CallOptions = {},
+  ): Promise<UsageDistribution> {
+    const q = range(query);
+    if (query.measure) q.set("measure", query.measure);
+    if (query.groupBy) q.set("groupBy", query.groupBy);
+    if (query.group) q.set("group", query.group);
+    if (query.organization) q.set("organization", query.organization);
+    const body = await this.#call(
+      "GET",
+      `/v1/usage/distribution?${q}`,
+      options,
+    );
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as UsageDistribution;
   }
 
   listTaskTypes(options: CallOptions = {}) {

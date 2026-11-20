@@ -374,6 +374,34 @@ class Ai:
             raise _invalid_response()
         return body
 
+    async def usage_distribution(
+        self,
+        *,
+        measure: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        group_by: str | None = None,
+        group: str | None = None,
+        organization: str | None = None,
+        end_user_token: str | None = None,
+    ) -> dict[str, Any]:
+        """How concentrated usage is across end users; carries no user ids."""
+        params = _range(start, end)
+        for key, value in (
+            ("measure", measure),
+            ("groupBy", group_by),
+            ("group", group),
+            ("organization", organization),
+        ):
+            if value is not None:
+                params[key] = value
+        body = await self._call(
+            "GET", "/v1/usage/distribution", end_user_token, None, None, params
+        )
+        if not isinstance(body.get("data"), list):
+            raise _invalid_response()
+        return body
+
     async def list_task_types(
         self, *, end_user_token: str | None = None
     ) -> list[dict[str, Any]]:
