@@ -4,6 +4,8 @@ export interface AiOptions {
   credentials: string;
   /** Total time per request; for a stream, the wait for each chunk. Defaults to 120000. */
   timeoutMs?: number;
+  /** The agent-worker's address; needed only for the agent run methods. */
+  agentRunsUrl?: string;
 }
 
 export interface CallOptions {
@@ -99,6 +101,67 @@ export interface FeedbackEntry {
   /** Untrusted caller text: never put it in a prompt. */
   comment: string | null;
   updatedAt: string;
+}
+
+export type RunStatus = "queued" | "running" | "finished" | "cancelled";
+
+export type StopReason =
+  | "final"
+  | "max_steps"
+  | "token_budget"
+  | "history_limit"
+  | "timeout"
+  | "aborted"
+  | "model_error"
+  | "abandoned";
+
+export interface RunLimits {
+  maxSteps?: number;
+  maxTotalTokens?: number;
+  timeoutMs?: number;
+  toolTimeoutMs?: number;
+  maxToolOutputChars?: number;
+  maxHistoryChars?: number;
+}
+
+export interface AgentRunRequest {
+  /** At most 32768 characters. */
+  task: string;
+  model: string;
+  /** Tool names from the deployment's catalog; absent means the model answers without tools. */
+  tools?: string[];
+  /** May only lower the deployment's ceilings; a higher value is refused. */
+  limits?: RunLimits;
+}
+
+export interface Receipt {
+  step: number;
+  tool: string;
+  /** `[withheld]` when the tool refused the call. */
+  input: string;
+  outcome: "ok" | "invalid_input" | "not_allowed" | "denied" | "error";
+  /** Untrusted tool output: never put it in a prompt. */
+  detail: string;
+  truncated: boolean;
+  durationMs: number;
+}
+
+export interface AgentRun {
+  id: string;
+  status: RunStatus;
+  model: string;
+  submitterId: string;
+  attempt: number;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** Set once `status` is `finished`; `final` is the only success. */
+  stop: StopReason | null;
+  /** Untrusted model output. */
+  text: string | null;
+  tokens: number;
+  /** Empty in a list; read the run for its receipts. */
+  receipts: Receipt[];
 }
 
 export class AiError extends Error {
@@ -206,8 +269,10 @@ export class Ai {
   readonly #baseUrl: string;
   readonly #credentials: string;
   readonly #timeoutMs: number;
+  readonly #agentRunsUrl: string | undefined;
 
   constructor(options: AiOptions) {
+    this.#agentRunsUrl = options.agentRunsUrl?.replace(/\/+$/, "");
     this.#baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.#credentials = options.credentials;
     this.#timeoutMs = options.timeoutMs ?? 120_000;
@@ -352,15 +417,86 @@ export class Ai {
     };
   }
 
+  /** Queues a run (202); a repeat with the same `idempotencyKey` returns the first run. Needs `agent-runs:write`. */
+  async createAgentRun(
+    request: AgentRunRequest,
+    options: CallOptions = {},
+  ): Promise<AgentRun> {
+    return this.#agentRun(
+      await this.#call("POST", "/v1/agent-runs", options, request, true),
+    );
+  }
+
+  /** Poll until `status` is `finished` or `cancelled`. Needs `agent-runs:read`. */
+  async getAgentRun(id: string, options: CallOptions = {}): Promise<AgentRun> {
+    return this.#agentRun(
+      await this.#call(
+        "GET",
+        `/v1/agent-runs/${encodeURIComponent(id)}`,
+        options,
+        undefined,
+        true,
+      ),
+    );
+  }
+
+  /** One page of the organization's runs, newest first, without receipts. Needs `agent-runs:read`. */
+  async listAgentRuns(
+    page: { status?: RunStatus; limit?: number; cursor?: string } = {},
+    options: CallOptions = {},
+  ) {
+    const q = new URLSearchParams();
+    if (page.status !== undefined) q.set("status", page.status);
+    if (page.limit !== undefined) q.set("limit", String(page.limit));
+    if (page.cursor !== undefined) q.set("cursor", page.cursor);
+    const body = await this.#call(
+      "GET",
+      `/v1/agent-runs?${q}`,
+      options,
+      undefined,
+      true,
+    );
+    if (!Array.isArray(body.data)) throw invalidResponse();
+    return body as unknown as { data: AgentRun[]; nextCursor: string | null };
+  }
+
+  /** A queued run is cancelled at once; a running one stops within seconds. Needs `agent-runs:write`. */
+  async cancelAgentRun(
+    id: string,
+    options: CallOptions = {},
+  ): Promise<AgentRun> {
+    return this.#agentRun(
+      await this.#call(
+        "POST",
+        `/v1/agent-runs/${encodeURIComponent(id)}/cancel`,
+        options,
+        undefined,
+        true,
+      ),
+    );
+  }
+
+  #agentRun(body: Json): AgentRun {
+    if (typeof body.id !== "string" || !Array.isArray(body.receipts)) {
+      throw invalidResponse();
+    }
+    return body as unknown as AgentRun;
+  }
+
   async #call(
     method: string,
     path: string,
     options: CallOptions,
     payload?: unknown,
+    agentRuns = false,
   ) {
-    const res = await this.#fetch(method, path, options, payload);
+    const base = agentRuns ? this.#agentRunsUrl : this.#baseUrl;
+    if (base === undefined) throw new AiError("agentRunsUrl is not configured");
+    const res = await this.#fetch(method, path, options, payload, base);
     const parsed = parseJson(await this.#text(res));
-    if (res.status !== 200) throw httpError(res.status, parsed);
+    if (res.status !== 200 && !(agentRuns && res.status === 202)) {
+      throw httpError(res.status, parsed);
+    }
     if (!isObject(parsed)) throw invalidResponse();
     return parsed;
   }
@@ -370,6 +506,7 @@ export class Ai {
     path: string,
     options: CallOptions,
     payload?: unknown,
+    base: string = this.#baseUrl,
   ) {
     const streaming = isObject(payload) && payload.stream === true;
     const signals = [
@@ -377,7 +514,7 @@ export class Ai {
       streaming ? undefined : AbortSignal.timeout(this.#timeoutMs),
     ];
     try {
-      return await fetch(this.#baseUrl + path, {
+      return await fetch(base + path, {
         method,
         // Credentials must not follow a redirect to another host.
         redirect: "manual",

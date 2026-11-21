@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from types import TracebackType
 from typing import Any, Self
+from urllib.parse import quote
 
 import httpx
 
@@ -102,8 +103,10 @@ class Ai:
         credentials: str,
         timeout: float = 120.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        agent_runs_url: str | None = None,
     ) -> None:
         self._timeout = timeout
+        self._agent_runs_url = agent_runs_url.rstrip("/") if agent_runs_url else None
         self._http = httpx.AsyncClient(
             base_url=base_url,
             headers={"authorization": f"Bearer {credentials}"},
@@ -295,6 +298,85 @@ class Ai:
             raise _invalid_response()
         return body
 
+    async def create_agent_run(
+        self,
+        *,
+        task: str,
+        model: str,
+        tools: list[str] | None = None,
+        limits: dict[str, int] | None = None,
+        end_user_token: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Queues a run (202); a repeat with the same idempotency key returns the first run.
+
+        Needs `agent-runs:write`. `limits` may only lower the deployment's ceilings.
+        """
+        payload: dict[str, Any] = {"task": task, "model": model}
+        if tools is not None:
+            payload["tools"] = tools
+        if limits is not None:
+            payload["limits"] = limits
+        return self._agent_run(
+            await self._call(
+                "POST", "/v1/agent-runs", end_user_token, idempotency_key, payload, agent=True
+            )
+        )
+
+    async def get_agent_run(
+        self, run_id: str, *, end_user_token: str | None = None
+    ) -> dict[str, Any]:
+        """Poll until `status` is `finished` or `cancelled`; needs `agent-runs:read`.
+
+        `text` and receipt `detail` are untrusted: never put them in a prompt.
+        """
+        return self._agent_run(
+            await self._call(
+                "GET", f"/v1/agent-runs/{quote(run_id, safe='')}", end_user_token, None, None,
+                agent=True,
+            )
+        )
+
+    async def list_agent_runs(
+        self,
+        *,
+        status: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        end_user_token: str | None = None,
+    ) -> dict[str, Any]:
+        """One page of the organization's runs, newest first, without receipts."""
+        params = {}
+        if status is not None:
+            params["status"] = status
+        if limit is not None:
+            params["limit"] = str(limit)
+        if cursor is not None:
+            params["cursor"] = cursor
+        body = await self._call(
+            "GET", "/v1/agent-runs", end_user_token, None, None, params, agent=True
+        )
+        if not isinstance(body.get("data"), list):
+            raise _invalid_response()
+        return body
+
+    async def cancel_agent_run(
+        self, run_id: str, *, end_user_token: str | None = None
+    ) -> dict[str, Any]:
+        """A queued run is cancelled at once; a running one stops within seconds."""
+        return self._agent_run(
+            await self._call(
+                "POST", f"/v1/agent-runs/{quote(run_id, safe='')}/cancel", end_user_token, None,
+                None, agent=True,
+            )
+        )
+
+    @staticmethod
+    def _agent_run(body: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(body.get("id"), str) or not isinstance(body.get("receipts"), list):
+            raise _invalid_response()
+        return body
+
     async def _call(
         self,
         method: str,
@@ -303,12 +385,15 @@ class Ai:
         idempotency_key: str | None,
         payload: dict[str, Any] | None,
         params: dict[str, str] | None = None,
+        agent: bool = False,
     ) -> dict[str, Any]:
+        if agent and self._agent_runs_url is None:
+            raise AiError("agent_runs_url is not configured")
         try:
             async with asyncio.timeout(self._timeout):
                 request = self._http.build_request(
                     method,
-                    path,
+                    self._agent_runs_url + path if agent else path,
                     json=payload,
                     params=params,
                     headers=_headers(end_user_token, idempotency_key),
@@ -323,7 +408,7 @@ class Ai:
         except httpx.HTTPError as e:
             raise _transport(e) from None
         parsed = _parse(raw)
-        if response.status_code != 200:
+        if response.status_code != 200 and not (agent and response.status_code == 202):
             raise _http_error(response.status_code, parsed)
         if not isinstance(parsed, dict):
             raise _invalid_response()
