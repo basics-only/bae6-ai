@@ -71,3 +71,25 @@ export function count(v: unknown): number {
   }
   return v;
 }
+
+const MAX_SSE_LINE = 1024 * 1024;
+
+/** The body's lines without line endings, including a last unterminated one. */
+export async function* sseLines(res: Response): AsyncGenerator<string> {
+  const tooLong = () =>
+    new ProviderError("provider stream line too long", "unknown");
+  let pending = "";
+  const decoder = new TextDecoder();
+  for await (const c of chunks(res)) {
+    pending += decoder.decode(c, { stream: true });
+    const lines = pending.split("\n");
+    pending = lines.pop() ?? "";
+    if (pending.length > MAX_SSE_LINE) throw tooLong();
+    for (const line of lines) {
+      if (line.length > MAX_SSE_LINE) throw tooLong();
+      yield line.replace(/\r$/, "");
+    }
+  }
+  pending += decoder.decode();
+  if (pending) yield pending.replace(/\r$/, "");
+}

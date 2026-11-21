@@ -1,0 +1,347 @@
+openapi: 3.1.0
+info:
+  title: bae6-ai eval-worker API
+  version: 1.0.0
+  summary: Bounded, queued evaluation runs for one tenant.
+  description: |
+    An eval run sends each case's input to a model through the gateway and scores the
+    output against the case's expected value. Poll `GET /v1/eval-runs/{id}`; there is no
+    callback.
+
+    **Identity and tenancy.** As for the gateway: the workload's bearer token identifies it,
+    and the organization and application come from the issuer configuration. A deployment
+    serves one organization; it starts only if every issuer maps to the same one. A run of
+    another organization is `404 not_found`.
+
+    **Scopes.** `eval-runs:write` submits and cancels; `eval-runs:read` reads and lists.
+
+    **Bounds.** A run holds at most the deployment's case ceiling; beyond it a submit is
+    `400 invalid_request`. The queue holds at most a configured number of unfinished runs
+    per organization; beyond it a submit is `429`.
+
+    **Delivery.** A run executes a bounded number of times. A run whose worker died is
+    retried from the start, and after the last attempt finishes with `stop: abandoned`.
+
+    **Untrusted text.** Case `input`, `expected` and every case `error` are caller or model
+    controlled.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+servers:
+  - url: http://localhost:8082
+    description: Local development
+security:
+  - bearer: []
+paths:
+  /health/live:
+    $ref: "./vendor/openapi/common.yaml#/paths/~1health~1live"
+  /health/ready:
+    $ref: "./vendor/openapi/common.yaml#/paths/~1health~1ready"
+  /v1/eval-runs:
+    post:
+      operationId: createEvalRun
+      summary: Queue an eval run. Needs `eval-runs:write`.
+      description: |
+        With an `Idempotency-Key`, a repeat of the same body returns the original run
+        with `Idempotent-Replayed: true`; the same key with another body is
+        `409 idempotency_key_reused`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEvalRun"
+      responses:
+        "200":
+          description: Replay of an earlier request with the same `Idempotency-Key`.
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, enum: ["true"] }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvalRun"
+        "202":
+          description: Queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvalRun"
+        "400":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/RateLimited"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+    get:
+      operationId: listEvalRuns
+      summary: The organization's eval runs, newest first. Needs `eval-runs:read`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/RunStatus" }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          description: The `nextCursor` of the previous page.
+          schema: { type: string, pattern: "^[0-9]{1,15}$" }
+      responses:
+        "200":
+          description: One page. Reports are omitted; read a run for its report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvalRunList"
+        "400":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/InvalidRequest"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/eval-runs/{id}:
+    get:
+      operationId: getEvalRun
+      summary: One eval run with its report. Needs `eval-runs:read`.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: The run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvalRun"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/NotFound"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+  /v1/eval-runs/{id}/cancel:
+    post:
+      operationId: cancelEvalRun
+      summary: Cancel an eval run. Needs `eval-runs:write`.
+      description: |
+        A queued run becomes `cancelled` at once. A running run is told to stop and becomes
+        `finished` with `stop: aborted` when its worker notices, normally within seconds.
+        Cancelling a finished run changes nothing and returns it.
+      parameters:
+        - $ref: "#/components/parameters/EndUserToken"
+        - $ref: "./vendor/openapi/common.yaml#/components/parameters/RequestId"
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: The run after the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvalRun"
+        "401":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unauthenticated"
+        "403":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Forbidden"
+        "404":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/NotFound"
+        "503":
+          $ref: "./vendor/openapi/common.yaml#/components/responses/Unavailable"
+components:
+  securitySchemes:
+    bearer:
+      $ref: "./vendor/openapi/common.yaml#/components/securitySchemes/bearer"
+  parameters:
+    EndUserToken:
+      name: Bae6-End-User-Token
+      in: header
+      description: Optional verified user token; the user becomes the run's submitter.
+      schema:
+        type: string
+        maxLength: 8192
+    RunId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: "^eval_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+  responses:
+    IdempotencyConflict:
+      description: |
+        `idempotency_key_reused`: the key was used for a different body.
+      content:
+        application/json:
+          schema:
+            $ref: "./vendor/schemas/error-envelope.json"
+  schemas:
+    RunStatus:
+      enum: [queued, running, finished, cancelled]
+    StopReason:
+      description: |
+        `complete` is the only success. `abandoned` means every attempt's worker died
+        before finishing.
+      enum: [complete, aborted, model_error, abandoned]
+    Scorer:
+      description: |
+        `exact` scores 1 when the model's trimmed output equals `expected`; `contains`
+        scores 1 when the output includes `expected`.
+      enum: [exact, contains]
+    Label:
+      type: string
+      pattern: "^[A-Za-z0-9._-]{1,64}$"
+    EvalCase:
+      type: object
+      required: [id, input, expected]
+      additionalProperties: false
+      properties:
+        id: { $ref: "#/components/schemas/Label" }
+        input: { type: string, minLength: 1, maxLength: 4000 }
+        expected: { type: string, minLength: 1, maxLength: 1000 }
+    CreateEvalRun:
+      type: object
+      required: [name, datasetVersion, model, cases]
+      additionalProperties: false
+      properties:
+        name: { $ref: "#/components/schemas/Label" }
+        datasetVersion: { $ref: "#/components/schemas/Label" }
+        model:
+          description: A model id the deployment's gateway serves.
+          type: string
+          pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
+        cases:
+          description: Between 1 and the deployment's case ceiling, with unique ids.
+          type: array
+          minItems: 1
+          maxItems: 10000
+          items: { $ref: "#/components/schemas/EvalCase" }
+        scorers:
+          description: Defaults to `[exact]`.
+          type: array
+          minItems: 1
+          maxItems: 2
+          uniqueItems: true
+          items: { $ref: "#/components/schemas/Scorer" }
+    CaseResult:
+      type: object
+      required: [id, status, scores, latencyMs, cost]
+      properties:
+        id: { type: string }
+        status: { enum: [ok, error, timeout] }
+        scores:
+          type: object
+          additionalProperties: { type: number }
+        latencyMs: { type: number, minimum: 0 }
+        cost: { type: [number, "null"] }
+        error: { type: string }
+    Report:
+      type: object
+      required:
+        [runId, dataset, seed, startedAt, cases, mean, failures, costKnown, totalCost]
+      properties:
+        runId: { type: string }
+        dataset:
+          type: object
+          required: [name, version]
+          properties:
+            name: { type: string }
+            version: { type: string }
+        seed: { type: integer }
+        startedAt: { type: string, format: date-time }
+        cases:
+          type: array
+          maxItems: 10000
+          items: { $ref: "#/components/schemas/CaseResult" }
+        mean:
+          type: object
+          additionalProperties: { type: number }
+        failures: { type: integer, minimum: 0 }
+        costKnown: { type: boolean }
+        totalCost: { type: [number, "null"] }
+    Summary:
+      type: object
+      required: [cases, failures, mean]
+      properties:
+        cases: { type: integer, minimum: 0 }
+        failures: { type: integer, minimum: 0 }
+        mean:
+          type: object
+          additionalProperties: { type: number }
+    EvalRun:
+      type: object
+      required:
+        - id
+        - status
+        - model
+        - name
+        - datasetVersion
+        - caseCount
+        - scorers
+        - submitterId
+        - attempt
+        - createdAt
+        - startedAt
+        - finishedAt
+        - stop
+        - summary
+        - report
+      properties:
+        id:
+          type: string
+          pattern: "^eval_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        status: { $ref: "#/components/schemas/RunStatus" }
+        model: { type: string }
+        name: { type: string }
+        datasetVersion: { type: string }
+        caseCount: { type: integer, minimum: 1 }
+        scorers:
+          type: array
+          items: { $ref: "#/components/schemas/Scorer" }
+        submitterId: { type: string }
+        attempt: { type: integer, minimum: 0 }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: [string, "null"], format: date-time }
+        finishedAt: { type: [string, "null"], format: date-time }
+        stop:
+          description: Set once `status` is `finished`.
+          oneOf:
+            - { $ref: "#/components/schemas/StopReason" }
+            - { type: "null" }
+        summary:
+          description: Set when the run completed.
+          oneOf:
+            - { $ref: "#/components/schemas/Summary" }
+            - { type: "null" }
+        report:
+          description: Set when the run completed. Always null in a list.
+          oneOf:
+            - { $ref: "#/components/schemas/Report" }
+            - { type: "null" }
+    EvalRunList:
+      type: object
+      required: [data, nextCursor]
+      properties:
+        data:
+          type: array
+          maxItems: 100
+          items: { $ref: "#/components/schemas/EvalRun" }
+        nextCursor: { type: [string, "null"] }

@@ -7,6 +7,7 @@ import { gatewayModel } from "./model.js";
 let reply: { status: number; body: unknown } = { status: 200, body: {} };
 let seen: {
   auth?: string | undefined;
+  runId?: string | undefined;
   body?: { max_tokens: number; messages: { role: string; content: string }[] };
 } = {};
 let base: string;
@@ -17,7 +18,11 @@ const server = createServer((req, res) => {
     raw += c;
   });
   req.on("end", () => {
-    seen = { auth: req.headers.authorization, body: JSON.parse(raw) };
+    seen = {
+      auth: req.headers.authorization,
+      runId: req.headers["bae6-run-id"] as string | undefined,
+      body: JSON.parse(raw),
+    };
     res.writeHead(reply.status, { "content-type": "application/json" });
     res.end(JSON.stringify(reply.body));
   });
@@ -40,6 +45,7 @@ const model = () =>
     baseUrl: base,
     token: async () => "tok",
     model: "m",
+    runId: "run_abc",
     maxOutputTokens: 100,
     requestTimeoutMs: 2000,
   });
@@ -47,6 +53,12 @@ const search = [{ name: "search", description: "find things" }];
 const ask = [{ role: "user" as const, text: "hi" }];
 const next = (tools: typeof search, remaining = 1000) =>
   model().next(ask, tools, new AbortController().signal, remaining);
+
+test("every model call carries the run id so its spend can be attributed", async () => {
+  reply = completion('{"final": "x"}');
+  await next([]);
+  assert.equal(seen.runId, "run_abc");
+});
 
 test("without tools the reply is the final answer, as the model wrote it", async () => {
   reply = completion('{"final": "not a protocol"}');
