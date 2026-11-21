@@ -63,6 +63,22 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  packages/integrations/langchain:
+    dependencies:
+      '@bae6/ai-agents':
+        specifier: workspace:*
+        version: link:../../agents
+    devDependencies:
+      '@types/node':
+        specifier: 22.18.10
+        version: 22.18.10
+      tsx:
+        specifier: 4.20.6
+        version: 4.20.6
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
   sdk/typescript:
     devDependencies:
       '@types/node':
