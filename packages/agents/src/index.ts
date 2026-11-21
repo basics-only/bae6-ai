@@ -39,6 +39,7 @@ export interface Limits {
   timeoutMs: number;
   toolTimeoutMs: number;
   maxToolOutputChars: number;
+  maxHistoryChars: number;
 }
 
 export interface Receipt {
@@ -55,6 +56,7 @@ export type StopReason =
   | "final"
   | "max_steps"
   | "token_budget"
+  | "history_limit"
   | "timeout"
   | "aborted"
   | "model_error";
@@ -79,6 +81,7 @@ const HARD_MAX = {
   tokens: 10_000_000,
   timeoutMs: 3_600_000,
   outputChars: 1_000_000,
+  historyChars: 10_000_000,
 };
 const MAX_LABEL_CHARS = 100;
 const MAX_INPUT_CHARS = 1_000;
@@ -91,7 +94,8 @@ export function validateLimits(l: Limits): void {
     !ok(l.maxTotalTokens, HARD_MAX.tokens) ||
     !ok(l.timeoutMs, HARD_MAX.timeoutMs) ||
     !ok(l.toolTimeoutMs, HARD_MAX.timeoutMs) ||
-    !ok(l.maxToolOutputChars, HARD_MAX.outputChars)
+    !ok(l.maxToolOutputChars, HARD_MAX.outputChars) ||
+    !ok(l.maxHistoryChars, HARD_MAX.historyChars)
   ) {
     throw new RangeError("agent limits must be integers within hard bounds");
   }
@@ -179,6 +183,7 @@ export function createAgent(config: AgentConfig) {
     const messages: AgentMessage[] = [{ role: "user", text: task }];
     const receipts: Receipt[] = [];
     let tokens = 0;
+    let historyChars = task.length;
     const done = (stop: StopReason, text?: string): RunResult =>
       text === undefined
         ? { stop, tokens, receipts }
@@ -188,6 +193,7 @@ export function createAgent(config: AgentConfig) {
 
     for (let step = 1; step <= limits.maxSteps; step++) {
       if (signal.aborted) return interrupted();
+      if (historyChars > limits.maxHistoryChars) return done("history_limit");
       let turn: unknown;
       try {
         turn = await race(
@@ -214,16 +220,15 @@ export function createAgent(config: AgentConfig) {
       const receipt = await execute(step, turn.call, signal);
       receipts.push(receipt);
       if (signal.aborted) return interrupted();
-      messages.push({
-        role: "assistant",
-        text: `call ${receipt.tool} ${receipt.input}`,
-      });
+      const asked = `call ${receipt.tool} ${receipt.input}`;
+      messages.push({ role: "assistant", text: asked });
       messages.push({
         role: "tool",
         name: receipt.tool,
         text: receipt.detail,
         untrusted: true,
       });
+      historyChars += asked.length + receipt.detail.length;
     }
     return done("max_steps");
   }
@@ -242,7 +247,11 @@ export function createAgent(config: AgentConfig) {
     ): Receipt => ({
       step,
       tool: cap(call.name, MAX_LABEL_CHARS),
-      input: show(call.input),
+      // Input the tool refused may be the very secret a guard blocked.
+      input:
+        outcome === "not_allowed" || outcome === "invalid_input"
+          ? "[withheld]"
+          : show(call.input),
       outcome,
       detail: cap(detail, max),
       truncated: truncated || detail.length > max,
